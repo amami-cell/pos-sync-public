@@ -9,7 +9,7 @@ import sys, os
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 import pos_common as C
 
-DINII_LOGIN_URL = os.environ.get("DINII_LOGIN_URL", "https://dashboard.self.dinii.jp/")
+DINII_LOGIN_URL = os.environ.get("DINII_LOGIN_URL") or "https://dashboard.self.dinii.jp/"
 
 
 def _login(page, user: str, pw: str):

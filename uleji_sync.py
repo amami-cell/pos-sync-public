@@ -10,7 +10,7 @@ import sys, os
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 import pos_common as C
 
-ULEJI_LOGIN_URL = os.environ.get("ULEJI_LOGIN_URL", "https://pos.usen-regi.com/cms/login/init")
+ULEJI_LOGIN_URL = os.environ.get("ULEJI_LOGIN_URL") or "https://pos.usen-regi.com/cms/login/init"
 
 
 def _login(page, company: str, user: str, pw: str):
