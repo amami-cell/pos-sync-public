@@ -279,3 +279,189 @@ def probe_form_state(page):
     for d in info:
         chk = "" if d["checked"] is None else f" checked={d['checked']}"
         print(f"  | {d['type']}\tid={d['id']}\tname={d['name']}\tph={d['ph']}\t空={d['empty']}{chk}")
+
+
+# ---- OTP(メール認証コード)の自動取得 ----
+# 新Uレジはログイン後にメールで届く認証コードを要求する。管理画面側で
+# 無効化できないため、実行しているプロセス自身がメールから取りに行く。
+# 対応方式は IMAP。ガルーンが直接IMAPで読めるならそれを、読めないなら
+# OTPメールだけを転送した専用アドレス（Gmail等）を指す。
+#
+# 必要な環境変数（すべて GitHub Secrets 経由）:
+#   OTP_IMAP_HOST  … 例 imap.gmail.com
+#   OTP_IMAP_USER  … メールアドレス
+#   OTP_IMAP_PASS  … アプリパスワード等（通常のログインパスワードではないことが多い）
+#   OTP_IMAP_PORT   (任意, 既定 993)
+#   OTP_IMAP_FOLDER (任意, 既定 INBOX)
+#   OTP_SUBJECT_HINT(任意, 既定 認証コード) … 件名/本文の絞り込み語
+#   OTP_CODE_REGEX  (任意, 既定 6桁の数字)
+#
+# コード自体はログに出さない。桁数だけ出す。
+OTP_DEFAULT_REGEX = r"(?<!\d)(\d{6})(?!\d)"
+
+
+def otp_imap_configured() -> bool:
+    return all(env(k) for k in ("OTP_IMAP_HOST", "OTP_IMAP_USER", "OTP_IMAP_PASS"))
+
+
+def _mail_text(msg) -> str:
+    """メール本文をテキストで取り出す（HTMLメールならタグを落とす）。"""
+    import re as _re
+    parts = []
+    if msg.is_multipart():
+        walk = msg.walk()
+    else:
+        walk = [msg]
+    for part in walk:
+        if part.get_content_maintype() == "multipart":
+            continue
+        ctype = part.get_content_type()
+        if ctype not in ("text/plain", "text/html"):
+            continue
+        try:
+            payload = part.get_payload(decode=True) or b""
+            charset = part.get_content_charset() or "utf-8"
+            text = payload.decode(charset, errors="replace")
+        except Exception:
+            continue
+        if ctype == "text/html":
+            text = _re.sub(r"<[^>]+>", " ", text)
+        parts.append(text)
+    return "\n".join(parts)
+
+
+def fetch_otp_via_imap(not_before, timeout_sec: int = 180, poll_sec: int = 10) -> str:
+    """not_before 以降に届いたメールから認証コードを取り出す。
+    not_before より前のメールは無視する（前回ログインの古いコードを拾わないため）。
+    見つかるまで poll_sec 間隔で最大 timeout_sec 待つ（メールは即着しないため）。"""
+    import imaplib, email, re, time
+    from email.utils import parsedate_to_datetime
+
+    host = env("OTP_IMAP_HOST"); user = env("OTP_IMAP_USER"); pw = env("OTP_IMAP_PASS")
+    port = int(env("OTP_IMAP_PORT") or 993)
+    folder = env("OTP_IMAP_FOLDER") or "INBOX"
+    hint = env("OTP_SUBJECT_HINT") or "認証コード"
+    pattern = re.compile(env("OTP_CODE_REGEX") or OTP_DEFAULT_REGEX)
+    if not (host and user and pw):
+        raise RuntimeError(
+            "OTP_IMAP_HOST / OTP_IMAP_USER / OTP_IMAP_PASS が未設定です。"
+            "READMEの『新UレジのOTP自動取得』を参照してください"
+        )
+
+    deadline = time.time() + timeout_sec
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with imaplib.IMAP4_SSL(host, port) as M:
+                M.login(user, pw)
+                M.select(folder, readonly=True)
+                # SINCE は日付単位なので、時刻での絞り込みは取得後に行う
+                since = not_before.strftime("%d-%b-%Y")
+                typ, data = M.search(None, f'(SINCE "{since}")')
+                ids = data[0].split() if typ == "OK" and data and data[0] else []
+                for num in reversed(ids):  # 新しいものから
+                    typ, raw = M.fetch(num, "(RFC822)")
+                    if typ != "OK" or not raw or not raw[0]:
+                        continue
+                    msg = email.message_from_bytes(raw[0][1])
+                    try:
+                        sent = parsedate_to_datetime(msg.get("Date"))
+                    except Exception:
+                        continue
+                    if sent is None:
+                        continue
+                    if sent.timestamp() < not_before.timestamp() - 120:
+                        continue  # ログイン試行より前のメールは古いコード
+                    subject = str(email.header.make_header(
+                        email.header.decode_header(msg.get("Subject") or "")))
+                    body = _mail_text(msg)
+                    if hint and hint not in subject and hint not in body:
+                        continue
+                    m = pattern.search(subject) or pattern.search(body)
+                    if m:
+                        code = m.group(1)
+                        print(f"[otp] 認証コードを取得（{len(code)}桁、{attempt}回目の確認、"
+                              f"メール受信 {sent.isoformat()}）")
+                        return code
+        except Exception as e:
+            print(f"[otp] IMAP確認でエラー（{attempt}回目、継続します）: {type(e).__name__}: {e}")
+
+        if time.time() >= deadline:
+            raise RuntimeError(
+                f"[otp] {timeout_sec}秒待っても『{hint}』を含む新着メールが見つかりませんでした。"
+                "転送設定・フォルダ名(OTP_IMAP_FOLDER)・絞り込み語(OTP_SUBJECT_HINT)を確認してください"
+            )
+        print(f"[otp] 未着。{poll_sec}秒後に再確認します")
+        time.sleep(poll_sec)
+
+
+def probe_cards(page, text: str = "ダウンロード", limit: int = 4):
+    """指定テキストのボタンが属する「カード」の中身をログへ。
+    同じ見た目のボタンが複数あるとき、どのカード（＝どの帳票）のものかを
+    見出し・ラベルごと読めるようにする。"""
+    try:
+        info = page.evaluate(
+            r"""(args) => {
+                const [txt, lim] = args;
+                const els = [...document.querySelectorAll('button')]
+                    .filter(el => (el.innerText || '').includes(txt));
+                return els.slice(0, lim).map(el => {
+                    // 十分な説明文を含む祖先までさかのぼる＝カード単位
+                    let p = el.parentElement, card = null, last = null;
+                    for (let i = 0; i < 10 && p; i++, p = p.parentElement) {
+                        const t = (p.innerText || '').trim();
+                        last = p;
+                        if (t.length > 60) { card = p; break; }
+                    }
+                    if (!card) card = last;  // 説明文が短いカードでも最上位の祖先は返す
+                    const inputs = card
+                        ? [...card.querySelectorAll('input')].map(x =>
+                            (x.getAttribute('placeholder') || x.id || x.type || '?')
+                            + (x.value ? '=入力済' : '=空')).slice(0, 8)
+                        : [];
+                    return {
+                        disabled: !!el.disabled,
+                        cardText: card ? (card.innerText || '').trim().replace(/\n+/g, ' / ').slice(0, 280) : '(カード特定できず)',
+                        inputs: inputs.join(', '),
+                    };
+                });
+            }""", [text, limit])
+    except Exception as e:
+        print(f"[cards] 調査に失敗: {e}")
+        return
+    print(f"[cards] 「{text}」ボタンを含むカード {len(info)}件")
+    for i, d in enumerate(info):
+        print(f"  [{i}] disabled={d['disabled']}")
+        print(f"      カード内容: {d['cardText']}")
+        print(f"      カード内の入力欄: {d['inputs']}")
+
+
+def click_and_watch(page, index: int, text: str = "ダウンロード", timeout_ms: int = 30000):
+    """指定インデックスのボタンを押してダウンロードを待つ。
+    落ちてこなかった場合は、画面に出た警告・エラーの文言を拾って返す。"""
+    btn = page.locator(f"button:has-text('{text}')").nth(index)
+    try:
+        if btn.is_disabled():
+            return None, f"[{index}] は disabled のため押せません"
+    except Exception:
+        pass
+    try:
+        with page.expect_download(timeout=timeout_ms) as dl:
+            btn.click(timeout=5000)
+        return open(dl.value.path(), "rb").read(), f"[{index}] からダウンロード成功"
+    except Exception as e:
+        msgs = []
+        for sel in (".ant-message", ".ant-notification", "[role=alert]", ".ant-form-item-explain"):
+            try:
+                loc = page.locator(sel)
+                for i in range(min(loc.count(), 3)):
+                    t = (loc.nth(i).inner_text() or "").strip()
+                    if t:
+                        msgs.append(f"{sel}: {t[:120]}")
+            except Exception:
+                continue
+        note = f"[{index}] ダウンロードされず（{type(e).__name__}）"
+        if msgs:
+            note += " / 画面のメッセージ: " + " | ".join(msgs)
+        return None, note

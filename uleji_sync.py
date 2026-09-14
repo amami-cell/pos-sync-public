@@ -12,6 +12,43 @@ import pos_common as C
 ULEJI_LOGIN_URL = os.environ.get("ULEJI_LOGIN_URL") or "https://pos.usen-regi.com/cms/login/init"
 
 
+def _submit_otp(page) -> bool:
+    """メールで届く認証コードを取得して入力し、認証まで進める。
+    コードはログインを実行しているこのプロセス自身が取りに行く（人手を挟まない）。"""
+    import datetime
+    if not C.otp_imap_configured():
+        raise RuntimeError(
+            "[uleji] 認証コードが必要ですが、メール取得の設定がありません。"
+            "OTP_IMAP_HOST / OTP_IMAP_USER / OTP_IMAP_PASS を Secrets に設定してください"
+        )
+    # 「認証コード再送」を押してから取りに行く。こうすると受信時刻が
+    # 確実にこの時刻より後になり、前回の古いコードを拾う事故を防げる。
+    sent_at = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        resend = page.get_by_role("button", name="認証コード再送")
+        if resend.count() > 0 and resend.first.is_visible():
+            resend.first.click()
+            print("[uleji] 認証コードを再送させました")
+            page.wait_for_timeout(2000)
+    except Exception as e:
+        print(f"[uleji] 再送ボタンの操作に失敗（届いている前提で続行）: {e}")
+
+    code = C.fetch_otp_via_imap(sent_at)
+    page.locator("#authenticationCode").fill(code)
+    page.get_by_role("button", name="認証", exact=True).click()
+    try:
+        page.wait_for_selector("#authenticationCode", state="hidden", timeout=30000)
+    except Exception:
+        pass
+    page.wait_for_timeout(2000)
+    still = detect_otp(page)
+    if still:
+        C.diag_dump(page, "uleji_otp_rejected")
+        raise RuntimeError("[uleji] 認証コードを入力しましたが、まだ認証画面のままです")
+    print("[uleji] 認証コードによるログインに成功しました")
+    return True
+
+
 def _open(page, company: str, user: str, pw: str):
     page.goto(ULEJI_LOGIN_URL, wait_until="domcontentloaded")
     try:
@@ -78,17 +115,21 @@ def fetch_csv(ym: str) -> bytes:
         if C.is_diag():
             page.wait_for_timeout(2000)
             C.diag_dump(page, "uleji_00_afterlogin")
-            print(f"[uleji][diag] OTP画面か: {'YES' if otp else 'NO'}")
+            print(f"[uleji][diag] OTP画面か: {'YES' if otp else 'NO'} / "
+                  f"メール取得の設定: {'あり' if C.otp_imap_configured() else 'なし'}")
+            if otp and C.otp_imap_configured():
+                try:
+                    _submit_otp(page)
+                    C.diag_dump(page, "uleji_01_after_otp")
+                    C.probe_elements(page, "CSV")
+                    C.probe_elements(page, "ダウンロード")
+                except Exception as e:
+                    print(f"[uleji][diag] OTP突破に失敗: {e}")
             browser.close()
             return b""
 
         if otp:
-            C.diag_dump(page, "uleji_otp_block")
-            browser.close()
-            raise RuntimeError(
-                "[uleji] ログイン後にメール認証コード(OTP)を要求されたため自動取得できません。"
-                "README『新UレジのOTP対策』の方針決定待ちです"
-            )
+            _submit_otp(page)
 
         # ---- 実取得: 売上/原価CSVのエクスポート（TODO: 診断出力で確定）----
         with page.expect_download() as dl_info:

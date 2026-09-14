@@ -151,8 +151,14 @@ def fetch_csv(ym: str) -> bytes:
             C.diag_dump(page, "dinii_02_after_period")
             print("---- 期間指定後の状態 ----")
             C.probe_elements(page, "ダウンロード")
-            C.probe_form_state(page)
-            data, sel = C.try_download(page, DL_SELECTORS, timeout_ms=30000)
+            C.probe_cards(page, "ダウンロード")
+            # どのボタンが本命か不明なので、押せるものを順に試して結果を記録する
+            data = None
+            for i in range(4):
+                data, note = C.click_and_watch(page, i)
+                print(f"[dinii][diag] {note}")
+                if data:
+                    break
             if data:
                 print(f"[dinii][diag] ダウンロード成功（効いたセレクタ: {sel}）")
                 C.describe_csv(data, "dinii_export_sample")
