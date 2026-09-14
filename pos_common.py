@@ -221,3 +221,61 @@ def describe_csv(data: bytes, tag: str, outdir: str = "diag") -> list[str]:
 
 def is_diag() -> bool:
     return os.environ.get("POS_DIAG", "") in ("1", "true", "yes")
+
+
+def probe_elements(page, text: str, limit: int = 6):
+    """指定テキストを含む要素の正体を暴く。
+    同じ文言のボタンが複数あって、どれが本命か分からない時に使う。
+    outerHTML・disabled・所属フォーム・近傍の見出しをログへ出す。"""
+    try:
+        info = page.evaluate(
+            """(args) => {
+                const [txt, lim] = args;
+                const els = [...document.querySelectorAll('button,[role=button],a,input[type=submit]')]
+                    .filter(el => ((el.innerText||el.value||'')).includes(txt));
+                return els.slice(0, lim).map(el => {
+                    const form = el.closest('form');
+                    let head = '';
+                    let p = el.parentElement;
+                    for (let i = 0; i < 6 && p; i++, p = p.parentElement) {
+                        const h = p.querySelector('h1,h2,h3,h4,legend,label');
+                        if (h && h.innerText) { head = h.innerText.trim().slice(0, 60); break; }
+                    }
+                    return {
+                        disabled: !!(el.disabled || el.getAttribute('aria-disabled') === 'true'),
+                        visible: el.offsetParent !== null,
+                        form: form ? (form.id || form.getAttribute('name') || '(無名form)') : '(formなし)',
+                        heading: head,
+                        html: el.outerHTML.slice(0, 300),
+                    };
+                });
+            }""", [text, limit])
+    except Exception as e:
+        print(f"[probe] 「{text}」の調査に失敗: {e}")
+        return
+    print(f"[probe] 「{text}」を含む要素 {len(info)}件")
+    for i, d in enumerate(info):
+        print(f"  [{i}] disabled={d['disabled']} visible={d['visible']} form={d['form']}")
+        print(f"      近傍見出し: {d['heading']}")
+        print(f"      html: {d['html']}")
+
+
+def probe_form_state(page):
+    """フォームの未入力箇所を洗い出す。DLボタンが disabled な理由の特定用。
+    値そのものは出さず、空かどうかだけを出す（認証情報を出さないため）。"""
+    try:
+        info = page.evaluate(
+            """() => [...document.querySelectorAll('input,select')].map(el => ({
+                id: el.id || '', name: el.getAttribute('name') || '',
+                ph: el.getAttribute('placeholder') || '',
+                type: el.getAttribute('type') || el.tagName.toLowerCase(),
+                empty: !(el.value && el.value.length),
+                checked: el.type === 'checkbox' ? el.checked : null,
+            }))""")
+    except Exception as e:
+        print(f"[probe] フォーム状態の取得に失敗: {e}")
+        return
+    print(f"[probe] フォーム入力状態 {len(info)}件（値は出さず空かどうかのみ）")
+    for d in info:
+        chk = "" if d["checked"] is None else f" checked={d['checked']}"
+        print(f"  | {d['type']}\tid={d['id']}\tname={d['name']}\tph={d['ph']}\t空={d['empty']}{chk}")

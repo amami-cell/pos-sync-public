@@ -141,8 +141,17 @@ def fetch_csv(ym: str) -> bytes:
                 C.diag_dump(page, "dinii_01_export")
             except Exception as e:
                 print(f"[dinii][diag] export画面への遷移失敗: {e}")
+            # 「ダウンロード」ボタンが有効1・無効1の2つあり、どちらが本命か不明。
+            # 正体（所属フォーム・近傍見出し・HTML）と、未入力の欄を洗い出す。
+            C.probe_elements(page, "ダウンロード")
+            C.probe_form_state(page)
             _set_period(page, ym)
+            page.keyboard.press("Escape")  # 日付パネルが開いたままだとボタンを覆う
+            page.wait_for_timeout(800)
             C.diag_dump(page, "dinii_02_after_period")
+            print("---- 期間指定後の状態 ----")
+            C.probe_elements(page, "ダウンロード")
+            C.probe_form_state(page)
             data, sel = C.try_download(page, DL_SELECTORS, timeout_ms=30000)
             if data:
                 print(f"[dinii][diag] ダウンロード成功（効いたセレクタ: {sel}）")

@@ -45,13 +45,10 @@ jobs:
       - name: diag-summary
         if: always()
         run: |
+          # 中身は各スクリプトが標準出力に echo 済み。ここで再掲すると
+          # ログのtailが埋まって本体の出力が読めなくなるので一覧だけ。
           echo "=== diag/ に出力されたファイル ==="
-          ls -la diag/ 2>/dev/null || { echo "(diag/ なし)"; exit 0; }
-          for f in diag/*.txt diag/*.tsv; do
-            [ -e "$f" ] || continue
-            echo "----- $f -----"
-            head -c 4000 "$f"; echo
-          done
+          ls -la diag/ 2>/dev/null || echo "(diag/ なし)"
       - name: upload-diag
         if: always()
         uses: actions/upload-artifact@v4
