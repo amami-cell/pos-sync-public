@@ -49,7 +49,12 @@ def _open(page, user: str, pw: str):
         except Exception:
             page.get_by_placeholder("パスワード").fill(pw)
         page.get_by_role("button", name="ログイン").click()
-        page.wait_for_load_state("networkidle")
+        # networkidle は使わない。SPAは背景通信が途切れず30秒待っても発火せずに
+        # タイムアウトする（run #5 の失敗原因）。ログイン後の画面に出る要素で待つ。
+        try:
+            page.wait_for_selector(":text(\"データ出力・連携\"), :text(\"ダッシュボード\")", timeout=30000)
+        except Exception:
+            print("[dinii] ログイン後の目印が見つからないまま続行（診断出力で確認）")
         page.wait_for_timeout(2000)
     else:
         print("[dinii] ログインフォーム無し＝既ログインとみなして続行")
@@ -115,7 +120,17 @@ def fetch_csv(ym: str) -> bytes:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
-        _open(page, user, pw)
+        try:
+            _open(page, user, pw)
+        except Exception as e:
+            # ログイン段階で落ちても診断だけは残す（run #5 では何も残らなかった）
+            print(f"[dinii] ログイン処理で例外: {e}")
+            C.diag_dump(page, "dinii_login_error")
+            if not C.is_diag():
+                browser.close()
+                raise
+            browser.close()
+            return b""
 
         # 診断モード：ダッシュボードとエクスポート画面の構造を出し、DLも試して終了
         if C.is_diag():

@@ -137,7 +137,7 @@ def diag_dump(page, tag: str, outdir: str = "diag"):
 
     # クリック候補（メニュー/ボタン/リンクのテキスト）
     try:
-        items = _uniq(page.evaluate("""() => [...document.querySelectorAll('a,button,[role=button],[role=menuitem]')]
+        items = _uniq(page.evaluate(r"""() => [...document.querySelectorAll('a,button,[role=button],[role=menuitem]')]
             .map(el => (el.innerText||el.getAttribute('aria-label')||'').trim().replace(/\s+/g,' '))
             .filter(t => t && t.length <= 40)"""))
         with open(f"{outdir}/{tag}_clickables.txt", "w", encoding="utf-8") as f:
@@ -148,7 +148,7 @@ def diag_dump(page, tag: str, outdir: str = "diag"):
 
     # リンク（text と href）— エクスポート画面のURLを直接特定するため
     try:
-        links = _uniq(page.evaluate("""() => [...document.querySelectorAll('a[href]')]
+        links = _uniq(page.evaluate(r"""() => [...document.querySelectorAll('a[href]')]
             .map(el => ((el.innerText||'').trim().replace(/\s+/g,' ').slice(0,40)) + '\t' + el.getAttribute('href'))"""))
         with open(f"{outdir}/{tag}_links.tsv", "w", encoding="utf-8") as f:
             f.write("text\thref\n" + "\n".join(links))
@@ -158,14 +158,14 @@ def diag_dump(page, tag: str, outdir: str = "diag"):
 
     # ボタンの棚卸し（disabled 状態つき）— 期間未指定でDLボタンが押せないケースを見分けるため
     try:
-        btns = _uniq(page.evaluate("""() => [...document.querySelectorAll('button,[role=button],a')]
+        btns = _uniq(page.evaluate(r"""() => [...document.querySelectorAll('button,[role=button],a')]
             .map(el => {
-                const t = (el.innerText||el.getAttribute('aria-label')||'').trim().replace(/\\s+/g,' ').slice(0,30);
+                const t = (el.innerText||el.getAttribute('aria-label')||'').trim().replace(/\s+/g,' ').slice(0,30);
                 if (!t) return '';
                 const off = el.disabled || el.getAttribute('aria-disabled') === 'true'
                     || (el.className||'').toString().includes('disabled');
                 const vis = el.offsetParent !== null || el.tagName === 'BODY';
-                return t + '\\t' + (off ? 'disabled' : 'enabled') + '\\t' + (vis ? 'visible' : 'hidden');
+                return t + '\t' + (off ? 'disabled' : 'enabled') + '\t' + (vis ? 'visible' : 'hidden');
             }).filter(Boolean)"""))
         with open(f"{outdir}/{tag}_buttons.tsv", "w", encoding="utf-8") as f:
             f.write("text\tstate\tvisible\n" + "\n".join(btns))
@@ -176,7 +176,7 @@ def diag_dump(page, tag: str, outdir: str = "diag"):
     # 入力欄の棚卸し — 期間指定(年月/開始日/終了日)のセレクタを確定するのに必須。
     # value は入力済みの値（＝認証情報が入りうる）なので出さない。
     try:
-        fields = _uniq(page.evaluate("""() => [...document.querySelectorAll('input,select,textarea')]
+        fields = _uniq(page.evaluate(r"""() => [...document.querySelectorAll('input,select,textarea')]
             .map(el => [el.tagName.toLowerCase(), el.getAttribute('type')||'', el.getAttribute('name')||'',
                         el.getAttribute('id')||'', el.getAttribute('placeholder')||''].join('\t'))"""))
         with open(f"{outdir}/{tag}_fields.tsv", "w", encoding="utf-8") as f:

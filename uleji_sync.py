@@ -30,7 +30,12 @@ def _open(page, company: str, user: str, pw: str):
         except Exception:
             page.get_by_placeholder("パスワードを入力").fill(pw)
         page.get_by_role("button", name="ログイン").click()
-        page.wait_for_load_state("networkidle")
+        # dinii と同じ理由で networkidle は使わない。OTP欄が出るか、
+        # 画面が切り替わるまでを上限つきで待つ。
+        try:
+            page.wait_for_selector("#authenticationCode", state="visible", timeout=20000)
+        except Exception:
+            pass
         page.wait_for_timeout(2000)
 
 
