@@ -1,12 +1,16 @@
 name: POS売上取込（ダイニー/新Uレジ）
 on:
   schedule:
-    - cron: '0 20 5 * *'   # 毎月6日 05:05 JST 目安（UTC 20:05 前日）。締め後に実行
+    - cron: '0 20 5 * *'   # 毎月6日 05:00 JST（UTC 前日20:00）。締め後に実行
   workflow_dispatch:
     inputs:
       month:
         description: '対象月 YYYY-MM（空なら先月）'
         required: false
+      diag:
+        description: '診断モード（ログイン後の画面をartifactに出力。導線確定用）: 1 で有効'
+        required: false
+        default: ''
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -25,12 +29,22 @@ jobs:
           DINII_PASS: ${{ secrets.DINII_PASS }}
           TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
           GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+          POS_DIAG: ${{ github.event.inputs.diag }}
         run: python dinii_sync.py "${{ github.event.inputs.month }}"
       - name: uleji
         env:
           ULEJI_LOGIN_URL: ${{ secrets.ULEJI_LOGIN_URL }}
+          ULEJI_COMPANY: ${{ secrets.ULEJI_COMPANY }}
           ULEJI_USER: ${{ secrets.ULEJI_USER }}
           ULEJI_PASS: ${{ secrets.ULEJI_PASS }}
           TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
           GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+          POS_DIAG: ${{ github.event.inputs.diag }}
         run: python uleji_sync.py "${{ github.event.inputs.month }}"
+      - name: upload-diag
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pos-diag
+          path: diag/
+          if-no-files-found: ignore

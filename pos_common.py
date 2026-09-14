@@ -97,3 +97,37 @@ def write_to_sheet(rows: list[dict], spreadsheet_id: str, worksheet: str = "POS�
 
 def now_str() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# ---- 診断: ログイン後の画面を artifact に吐く（エクスポート導線をスクショ無しで確定するため）----
+# 環境変数 POS_DIAG=1 のとき、ログイン直後の画面のスクショ・HTML・リンク一覧を
+# ./diag/ に保存する。GitHub Actions で artifact として上げれば導線を確定できる。
+def diag_dump(page, tag: str, outdir: str = "diag"):
+    import os as _os
+    _os.makedirs(outdir, exist_ok=True)
+    try:
+        page.screenshot(path=f"{outdir}/{tag}.png", full_page=True)
+    except Exception as e:
+        print(f"[diag] screenshot失敗 {tag}: {e}")
+    try:
+        html = page.content()
+        with open(f"{outdir}/{tag}.html", "w", encoding="utf-8") as f:
+            f.write(html)
+    except Exception as e:
+        print(f"[diag] html失敗 {tag}: {e}")
+    # 画面上のクリック候補（メニュー/ボタン/リンクのテキスト）を列挙
+    try:
+        items = page.evaluate("""() => [...document.querySelectorAll('a,button,[role=button],[role=menuitem]')]
+            .map(el => (el.innerText||el.getAttribute('aria-label')||'').trim())
+            .filter(t => t && t.length <= 30)""")
+        seen, uniq = set(), []
+        for t in items:
+            if t not in seen:
+                seen.add(t); uniq.append(t)
+        with open(f"{outdir}/{tag}_clickables.txt", "w", encoding="utf-8") as f:
+            f.write("\n".join(uniq))
+        print(f"[diag] {tag}: クリック候補 {len(uniq)}件を {outdir}/{tag}_clickables.txt へ")
+    except Exception as e:
+        print(f"[diag] clickable列挙失敗 {tag}: {e}")
+
+def is_diag() -> bool:
+    return os.environ.get("POS_DIAG", "") in ("1", "true", "yes")

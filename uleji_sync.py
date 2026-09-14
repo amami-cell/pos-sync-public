@@ -1,41 +1,62 @@
 """
-uleji_sync.py — 新Uレジ管理画面から売上/原価CSVを取得してシートへ
+uleji_sync.py — 新Uレジ(USENレジ)管理画面から売上/原価CSVを取得してシートへ
 使い方:  python uleji_sync.py [YYYY-MM]
-Secrets: ULEJI_USER / ULEJI_PASS  （+ 出力先 TARGET_SHEET_ID か ローカルCSV）
-※ TODO は管理画面を共有してもらってから確定（ログインURL・セレクタ・エクスポート導線・CSV列名）
+Secrets: ULEJI_COMPANY(=企業コード) / ULEJI_USER(=担当者コード) / ULEJI_PASS(=パスワード)
+         （+ 出力先 TARGET_SHEET_ID か ローカルCSV）
+ログイン欄は実画面に確定済み：企業コード / 担当者コード / パスワード / 「ログイン」ボタン。
+売上レポートへの導線・CSV列マッピングは POS_DIAG=1 の診断出力を見て確定する（下部 TODO）。
 """
 import sys, os
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 import pos_common as C
 
-ULEJI_LOGIN_URL = os.environ.get("ULEJI_LOGIN_URL", "")  # TODO: 管理画面のログインURL
+ULEJI_LOGIN_URL = os.environ.get("ULEJI_LOGIN_URL") or "https://pos.usen-regi.com/cms/login/init"
+
+
+def _login(page, company: str, user: str, pw: str):
+    page.goto(ULEJI_LOGIN_URL, wait_until="networkidle")
+    # 3欄ログイン。placeholderで確実に掴む。
+    page.get_by_placeholder("企業コードを入力").wait_for(state="visible", timeout=30000)
+    page.get_by_placeholder("企業コードを入力").fill(company)
+    page.get_by_placeholder("担当者コードを入力").fill(user)
+    # パスワードは type=password を優先
+    try:
+        page.locator("input[type='password']").first.fill(pw)
+    except Exception:
+        page.get_by_placeholder("パスワードを入力").fill(pw)
+    page.get_by_role("button", name="ログイン").click()
+    page.wait_for_load_state("networkidle")
+
 
 def fetch_csv(ym: str) -> bytes:
-    user = C.env("ULEJI_USER"); pw = C.env("ULEJI_PASS")
-    if not (user and pw and ULEJI_LOGIN_URL):
-        raise RuntimeError("ULEJI_USER / ULEJI_PASS / ULEJI_LOGIN_URL を設定してください")
+    company = C.env("ULEJI_COMPANY"); user = C.env("ULEJI_USER"); pw = C.env("ULEJI_PASS")
+    if not (company and user and pw):
+        raise RuntimeError("ULEJI_COMPANY(企業コード) / ULEJI_USER(担当者コード) / ULEJI_PASS を設定してください")
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
-        # 1) ログイン ---- TODO: セレクタを実画面に合わせる
-        page.goto(ULEJI_LOGIN_URL, wait_until="networkidle")
-        page.fill("input[type='email'], input[name='email']", user)      # TODO
-        page.fill("input[type='password'], input[name='password']", pw)  # TODO
-        page.click("button[type='submit']")                              # TODO
-        page.wait_for_load_state("networkidle")
-        # 2) 売上レポート画面へ ---- TODO: メニュー導線
-        # page.click("text=売上"); page.click("text=レポート")
-        # 3) 対象月を指定 ---- TODO: 期間セレクタ
-        # page.fill("input[name='month']", ym)
-        # 4) CSVエクスポートをクリックし、ダウンロードを捕捉（数字はスクレイプしない）
+        try:
+            _login(page, company, user, pw)
+        except PWTimeout:
+            C.diag_dump(page, "uleji_login_fail")
+            raise RuntimeError("[uleji] ログイン画面の要素が見つからない。diag/uleji_login_fail.* を確認")
+
+        # 診断モード：ログイン後の画面を吐いて終了（エクスポート導線の確定用）
+        if C.is_diag():
+            page.wait_for_timeout(3000)
+            C.diag_dump(page, "uleji_after_login")
+            browser.close()
+            print("[uleji] POS_DIAG: ログイン後の画面を diag/ に出力しました")
+            return b""
+
+        # ---- 2) 売上レポート → CSVエクスポート導線（TODO: 診断出力を見て確定）----
         with page.expect_download() as dl_info:
-            page.click("text=CSV")   # TODO: エクスポートボタンの実セレクタ
-        download = dl_info.value
-        path = download.path()
-        data = open(path, "rb").read()
+            page.click("text=CSV")  # TODO: エクスポートボタンの実セレクタ
+        data = open(dl_info.value.path(), "rb").read()
         browser.close()
         return data
+
 
 def normalize(rows: list[dict], ym: str) -> list[dict]:
     """新UレジCSVの列名 -> 共通スキーマ。TODO: 実CSVのヘッダに合わせてキーを対応付け。"""
@@ -54,9 +75,12 @@ def normalize(rows: list[dict], ym: str) -> list[dict]:
         })
     return out
 
+
 def main():
     ym = C.last_month(sys.argv[1] if len(sys.argv) > 1 else None)
     data = fetch_csv(ym)
+    if not data:  # 診断モードは空で返る
+        return
     rows = normalize(C.parse_csv_bytes(data), ym)
     print(f"[uleji] {ym}: {len(rows)}店取得")
     sid = C.env("TARGET_SHEET_ID")
@@ -64,6 +88,7 @@ def main():
         C.write_to_sheet(rows, sid, worksheet="POS売上")
     else:
         C.write_local_csv(rows, f"uleji_{ym}.csv")
+
 
 if __name__ == "__main__":
     main()

@@ -15,8 +15,15 @@ API/トークンがあるPOSはPlaywright不要でAPI直取りに差し替え可
 
 ## セットアップ（credはSecretsに。チャット/コードに直書きしない）
 GitHub → リポジトリ → Settings → Secrets and variables → Actions に登録：
-- `DINII_LOGIN_URL`, `DINII_USER`, `DINII_PASS`
-- `ULEJI_LOGIN_URL`, `ULEJI_USER`, `ULEJI_PASS`
+- ダイニー（2欄ログイン）
+  - `DINII_USER` … ログイン用**メールアドレス**
+  - `DINII_PASS` … パスワード
+  - `DINII_LOGIN_URL`（任意。既定 `https://dashboard.self.dinii.jp/`）
+- 新Uレジ／USENレジ（**3欄ログイン**）
+  - `ULEJI_COMPANY` … **企業コード**
+  - `ULEJI_USER` … **担当者コード**
+  - `ULEJI_PASS` … パスワード
+  - `ULEJI_LOGIN_URL`（任意。既定 `https://pos.usen-regi.com/cms/login/init`）
 - `TARGET_SHEET_ID`（書込先スプレッドID）と `GCP_SA_JSON`（サービスアカウントのJSON丸ごと）
   ※ infomart-bot SAはDrive容量枯渇の既知課題。書込先は個人アカ所有シートにSAを共有編集者で追加するのが安全。
   ※ SAを使わない場合は `TARGET_SHEET_ID` 未設定でローカルCSV出力に自動フォールバック（既存GAS取込運用向け）。
@@ -29,6 +36,14 @@ POSごとに以下のいずれか：
 4. どの店舗がどちらのPOSか（店舗→POS対応）
 
 → これで `TODO` のログインセレクタ・エクスポート導線・CSV列マッピング（`normalize`）を確定します。
+
+### 診断モード（スクショ無しでエクスポート導線を確定する）
+ログイン欄は確定済み。残りの「売上レポート→CSV出力」の導線は、実行環境から実画面を出力させて詰める。
+1. Actions → このワークフロー → **Run workflow** で `diag` に `1` を入れて実行。
+2. ログイン直後の画面のスクショ・HTML・クリック候補一覧が **artifact `pos-diag`** に上がる。
+3. その artifact を私（Claude）に渡せば、エクスポート導線と期間指定を確定してTODOを埋める。
+   （＝管理画面のDevToolsを触らずに済む）
+※ 診断モードはログインするだけで売上取得・シート書込は行わない（安全に導線だけ確認）。
 
 ## ローカル実行（PowerShell運用メモ）
 - `&&` は使わない（`;` で連結）。日本語文字列を渡す時はbase64推奨。コマンドは1つずつ。
