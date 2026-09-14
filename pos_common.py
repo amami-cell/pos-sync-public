@@ -156,6 +156,23 @@ def diag_dump(page, tag: str, outdir: str = "diag"):
     except Exception as e:
         print(f"[diag:{tag}] link列挙失敗: {e}")
 
+    # ボタンの棚卸し（disabled 状態つき）— 期間未指定でDLボタンが押せないケースを見分けるため
+    try:
+        btns = _uniq(page.evaluate("""() => [...document.querySelectorAll('button,[role=button],a')]
+            .map(el => {
+                const t = (el.innerText||el.getAttribute('aria-label')||'').trim().replace(/\\s+/g,' ').slice(0,30);
+                if (!t) return '';
+                const off = el.disabled || el.getAttribute('aria-disabled') === 'true'
+                    || (el.className||'').toString().includes('disabled');
+                const vis = el.offsetParent !== null || el.tagName === 'BODY';
+                return t + '\\t' + (off ? 'disabled' : 'enabled') + '\\t' + (vis ? 'visible' : 'hidden');
+            }).filter(Boolean)"""))
+        with open(f"{outdir}/{tag}_buttons.tsv", "w", encoding="utf-8") as f:
+            f.write("text\tstate\tvisible\n" + "\n".join(btns))
+        _echo(tag, "ボタン(text/状態/表示)", btns)
+    except Exception as e:
+        print(f"[diag:{tag}] button列挙失敗: {e}")
+
     # 入力欄の棚卸し — 期間指定(年月/開始日/終了日)のセレクタを確定するのに必須。
     # value は入力済みの値（＝認証情報が入りうる）なので出さない。
     try:

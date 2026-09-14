@@ -6,7 +6,7 @@ Secrets: DINII_USER(=ログイン用メールアドレス) / DINII_PASS  （+ �
 CSV出力は「データ出力・連携 → CSVダウンロード」＝ /aggregatedData/daily/export。
 期間指定とダウンロードボタンの実セレクタは POS_DIAG=1 の診断出力（ジョブログ）で確定する。
 """
-import sys, os
+import sys, os, datetime
 from playwright.sync_api import sync_playwright
 import pos_common as C
 
@@ -16,13 +16,13 @@ EXPORT_PATH = "/aggregatedData/daily/export"
 
 # ダウンロードボタンの候補。効いたものは診断ログに出るので、確定後は先頭に寄せる。
 DL_SELECTORS = [
-    "button:has-text('CSVダウンロード')",
     "button:has-text('ダウンロード')",
+    "[role=button]:has-text('ダウンロード')",
+    "a:has-text('ダウンロード')",
+    ":text-is('ダウンロード')",
+    "button:has-text('CSVダウンロード')",
     "button:has-text('CSV')",
     "button:has-text('出力')",
-    "a:has-text('CSVダウンロード')",
-    "a:has-text('ダウンロード')",
-    ":text('CSVダウンロード')",
 ]
 
 
@@ -65,32 +65,48 @@ def _goto_export(page):
         page.wait_for_timeout(2500)
 
 
+def _fill_picker(page, placeholder: str, value: str) -> bool:
+    """Ant Design の DatePicker に日付を入れる。クリック→入力→Enter が定石。
+    入力後に value を読み直して、本当に入ったかを確認する。"""
+    loc = page.get_by_placeholder(placeholder)
+    if loc.count() == 0:
+        return False
+    el = loc.first
+    try:
+        el.click()
+        page.wait_for_timeout(300)
+        el.fill(value)
+        page.wait_for_timeout(300)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(600)
+        got = (el.input_value() or "").strip()
+        if got:
+            print(f"[dinii] 期間 {placeholder} = {got}")
+            return True
+        print(f"[dinii] 期間 {placeholder} に {value} を入れたが空のまま")
+    except Exception as e:
+        print(f"[dinii] 期間 {placeholder} 入力失敗: {e}")
+    return False
+
+
 def _set_period(page, ym: str):
-    """対象月を期間欄に入れる。欄の実セレクタが未確定なので、当たったものだけ使う。
-    入らなかった場合は画面の既定期間のままCSVを落とし、normalize側の年月で辻褄を合わせる。"""
-    y, m = ym.split("-")
-    first = f"{y}-{m}-01"
+    """対象月を期間欄に入れる。実画面は Ant Design の DatePicker で、
+    プレースホルダは「開始日付」「終了日付」（type=date ではない）。
+    書式が環境で違いうるので YYYY-MM-DD → YYYY/MM/DD の順に試す。"""
     import calendar
-    last = f"{y}-{m}-{calendar.monthrange(int(y), int(m))[1]:02d}"
-    filled = []
-    for sel, val in [("input[type='date']", first), ("input[type='month']", ym)]:
-        loc = page.locator(sel)
-        n = loc.count()
-        if n == 0:
-            continue
-        try:
-            loc.nth(0).fill(val)
-            filled.append(f"{sel}[0]={val}")
-            if sel == "input[type='date']" and n > 1:
-                loc.nth(1).fill(last)
-                filled.append(f"{sel}[1]={last}")
-        except Exception as e:
-            print(f"[dinii] 期間入力失敗 {sel}: {e}")
-    if filled:
-        print(f"[dinii] 期間を指定: {', '.join(filled)}")
-        page.wait_for_timeout(1500)
-    else:
-        print("[dinii] 期間欄が見つからず。画面の既定期間のまま取得します（要確認）")
+    y, m = int(ym.split("-")[0]), int(ym.split("-")[1])
+    last_day = calendar.monthrange(y, m)[1]
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        first = datetime.date(y, m, 1).strftime(fmt)
+        last = datetime.date(y, m, last_day).strftime(fmt)
+        ok_s = _fill_picker(page, "開始日付", first)
+        ok_e = _fill_picker(page, "終了日付", last)
+        if ok_s and ok_e:
+            page.wait_for_timeout(1200)
+            return True
+        print(f"[dinii] 書式 {fmt} では入らず。次の書式を試します")
+    print("[dinii] 期間欄に入力できませんでした（画面の既定期間のまま進みます）")
+    return False
 
 
 def fetch_csv(ym: str) -> bytes:
@@ -111,7 +127,8 @@ def fetch_csv(ym: str) -> bytes:
             except Exception as e:
                 print(f"[dinii][diag] export画面への遷移失敗: {e}")
             _set_period(page, ym)
-            data, sel = C.try_download(page, DL_SELECTORS)
+            C.diag_dump(page, "dinii_02_after_period")
+            data, sel = C.try_download(page, DL_SELECTORS, timeout_ms=30000)
             if data:
                 print(f"[dinii][diag] ダウンロード成功（効いたセレクタ: {sel}）")
                 C.describe_csv(data, "dinii_export_sample")
@@ -123,7 +140,7 @@ def fetch_csv(ym: str) -> bytes:
         # ---- 実取得 ----
         _goto_export(page)
         _set_period(page, ym)
-        data, sel = C.try_download(page, DL_SELECTORS)
+        data, sel = C.try_download(page, DL_SELECTORS, timeout_ms=30000)
         if not data:
             C.diag_dump(page, "dinii_dl_fail")
             browser.close()

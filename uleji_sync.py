@@ -39,7 +39,15 @@ OTP_HINTS = ["認証コード", "確認コード", "ワンタイム", "メール
 
 
 def detect_otp(page) -> str | None:
-    """メール認証コード画面かどうかを判定し、当たった手掛かりを返す。"""
+    """メール認証コード画面かを判定して手掛かりを返す。
+    実画面ではログインフォームと同じページに #authenticationCode があり、
+    OTP要求時だけ表示される。DOMの有無ではなく『見えているか』で判定する。"""
+    try:
+        code = page.locator("#authenticationCode")
+        if code.count() > 0 and code.first.is_visible():
+            return "#authenticationCode が表示されている"
+    except Exception:
+        pass
     try:
         body = page.inner_text("body")[:4000]
     except Exception:
