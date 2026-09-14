@@ -32,6 +32,7 @@ jobs:
           POS_DIAG: ${{ github.event.inputs.diag }}
         run: python dinii_sync.py "${{ github.event.inputs.month }}"
       - name: uleji
+        if: always()
         env:
           ULEJI_LOGIN_URL: ${{ secrets.ULEJI_LOGIN_URL }}
           ULEJI_COMPANY: ${{ secrets.ULEJI_COMPANY }}
@@ -41,6 +42,16 @@ jobs:
           GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
           POS_DIAG: ${{ github.event.inputs.diag }}
         run: python uleji_sync.py "${{ github.event.inputs.month }}"
+      - name: diag-summary
+        if: always()
+        run: |
+          echo "=== diag/ に出力されたファイル ==="
+          ls -la diag/ 2>/dev/null || { echo "(diag/ なし)"; exit 0; }
+          for f in diag/*.txt diag/*.tsv; do
+            [ -e "$f" ] || continue
+            echo "----- $f -----"
+            head -c 4000 "$f"; echo
+          done
       - name: upload-diag
         if: always()
         uses: actions/upload-artifact@v4

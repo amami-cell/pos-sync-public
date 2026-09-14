@@ -98,49 +98,109 @@ def write_to_sheet(rows: list[dict], spreadsheet_id: str, worksheet: str = "POS�
 def now_str() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# ---- 診断: ログイン後の画面を artifact に吐く（エクスポート導線をスクショ無しで確定するため）----
-# 環境変数 POS_DIAG=1 のとき、ログイン直後の画面のスクショ・HTML・リンク一覧を
-# ./diag/ に保存する。GitHub Actions で artifact として上げれば導線を確定できる。
+# ---- 診断: 画面の構造を diag/ に保存し、要点はジョブログにも出す ----
+# POS_DIAG=1 のとき、スクショ・HTML・クリック候補・リンク・入力欄一覧を ./diag/ に保存する。
+# artifact が取得できない環境でも導線を確定できるよう、要点は標準出力にも echo する
+# （このリポジトリは private なのでジョブログは外部に出ない）。
+DIAG_ECHO_MAX = 60  # ログに出す最大件数（多すぎるログを防ぐ）
+
+
+def _uniq(seq):
+    seen, out = set(), []
+    for t in seq:
+        if t and t not in seen:
+            seen.add(t); out.append(t)
+    return out
+
+
+def _echo(tag: str, label: str, items: list[str]):
+    """診断結果の要点をジョブログへ。件数が多いときは先頭のみ。"""
+    shown = items[:DIAG_ECHO_MAX]
+    print(f"[diag:{tag}] {label} ({len(items)}件" + (f"、先頭{len(shown)}件を表示" if len(shown) < len(items) else "") + ")")
+    for t in shown:
+        print(f"    | {t}")
+
+
 def diag_dump(page, tag: str, outdir: str = "diag"):
     import os as _os
     _os.makedirs(outdir, exist_ok=True)
+    print(f"[diag:{tag}] URL = {page.url}")
     try:
         page.screenshot(path=f"{outdir}/{tag}.png", full_page=True)
     except Exception as e:
-        print(f"[diag] screenshot失敗 {tag}: {e}")
+        print(f"[diag:{tag}] screenshot失敗: {e}")
     try:
-        html = page.content()
         with open(f"{outdir}/{tag}.html", "w", encoding="utf-8") as f:
-            f.write(html)
+            f.write(page.content())
     except Exception as e:
-        print(f"[diag] html失敗 {tag}: {e}")
-    # 画面上のクリック候補（メニュー/ボタン/リンクのテキスト）を列挙
+        print(f"[diag:{tag}] html失敗: {e}")
+
+    # クリック候補（メニュー/ボタン/リンクのテキスト）
     try:
-        items = page.evaluate("""() => [...document.querySelectorAll('a,button,[role=button],[role=menuitem]')]
-            .map(el => (el.innerText||el.getAttribute('aria-label')||'').trim())
-            .filter(t => t && t.length <= 30)""")
-        seen, uniq = set(), []
-        for t in items:
-            if t not in seen:
-                seen.add(t); uniq.append(t)
+        items = _uniq(page.evaluate("""() => [...document.querySelectorAll('a,button,[role=button],[role=menuitem]')]
+            .map(el => (el.innerText||el.getAttribute('aria-label')||'').trim().replace(/\s+/g,' '))
+            .filter(t => t && t.length <= 40)"""))
         with open(f"{outdir}/{tag}_clickables.txt", "w", encoding="utf-8") as f:
-            f.write("\n".join(uniq))
-        print(f"[diag] {tag}: クリック候補 {len(uniq)}件を {outdir}/{tag}_clickables.txt へ")
+            f.write("\n".join(items))
+        _echo(tag, "クリック候補", items)
     except Exception as e:
-        print(f"[diag] clickable列挙失敗 {tag}: {e}")
-    # 画面内リンク（href付き）— エクスポート画面のURLを直接特定するため
+        print(f"[diag:{tag}] clickable列挙失敗: {e}")
+
+    # リンク（text と href）— エクスポート画面のURLを直接特定するため
     try:
-        links = page.evaluate("""() => [...document.querySelectorAll('a[href]')]
-            .map(el => ((el.innerText||'').trim().slice(0,30)) + '\\t' + el.getAttribute('href'))""")
-        seen, uniq = set(), []
-        for t in links:
-            if t not in seen:
-                seen.add(t); uniq.append(t)
+        links = _uniq(page.evaluate("""() => [...document.querySelectorAll('a[href]')]
+            .map(el => ((el.innerText||'').trim().replace(/\s+/g,' ').slice(0,40)) + '\t' + el.getAttribute('href'))"""))
         with open(f"{outdir}/{tag}_links.tsv", "w", encoding="utf-8") as f:
-            f.write("text\thref\n" + "\n".join(uniq))
-        print(f"[diag] {tag}: リンク {len(uniq)}件を {outdir}/{tag}_links.tsv へ")
+            f.write("text\thref\n" + "\n".join(links))
+        _echo(tag, "リンク(text→href)", links)
     except Exception as e:
-        print(f"[diag] link列挙失敗 {tag}: {e}")
+        print(f"[diag:{tag}] link列挙失敗: {e}")
+
+    # 入力欄の棚卸し — 期間指定(年月/開始日/終了日)のセレクタを確定するのに必須。
+    # value は入力済みの値（＝認証情報が入りうる）なので出さない。
+    try:
+        fields = _uniq(page.evaluate("""() => [...document.querySelectorAll('input,select,textarea')]
+            .map(el => [el.tagName.toLowerCase(), el.getAttribute('type')||'', el.getAttribute('name')||'',
+                        el.getAttribute('id')||'', el.getAttribute('placeholder')||''].join('\t'))"""))
+        with open(f"{outdir}/{tag}_fields.tsv", "w", encoding="utf-8") as f:
+            f.write("tag\ttype\tname\tid\tplaceholder\n" + "\n".join(fields))
+        _echo(tag, "入力欄(tag/type/name/id/placeholder)", fields)
+    except Exception as e:
+        print(f"[diag:{tag}] field列挙失敗: {e}")
+
+
+def try_download(page, selectors: list[str], timeout_ms: int = 10000):
+    """候補セレクタを順に押してダウンロードを捕捉。成功したら (bytes, 効いたセレクタ)。"""
+    for sel in selectors:
+        try:
+            with page.expect_download(timeout=timeout_ms) as dl:
+                page.locator(sel).first.click(timeout=4000)
+            return open(dl.value.path(), "rb").read(), sel
+        except Exception:
+            continue
+    return None, None
+
+
+def describe_csv(data: bytes, tag: str, outdir: str = "diag") -> list[str]:
+    """落ちたCSVを diag/ に保存し、列名（＝スキーマ）だけをログに出す。数値データはログに出さない。"""
+    import os as _os
+    _os.makedirs(outdir, exist_ok=True)
+    with open(f"{outdir}/{tag}.csv", "wb") as f:
+        f.write(data)
+    rows = parse_csv_bytes(data)
+    header = list(rows[0].keys()) if rows else []
+    print(f"[diag:{tag}] CSV {len(rows)}行 / {len(header)}列")
+    _echo(tag, "CSV列名", header)
+    # 店舗名らしき列の値だけは STORE_MAP を埋めるのに要るので、その列のユニーク値を出す
+    for key in header:
+        if any(k in key for k in ("店舗", "店名", "shop", "store")):
+            vals = _uniq([str(r.get(key, "")).strip() for r in rows])
+            _echo(tag, f"列「{key}」のユニーク値", vals)
+            break
+    with open(f"{outdir}/{tag}_header.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(header))
+    return header
+
 
 def is_diag() -> bool:
     return os.environ.get("POS_DIAG", "") in ("1", "true", "yes")

@@ -34,6 +34,22 @@ def _open(page, company: str, user: str, pw: str):
         page.wait_for_timeout(2000)
 
 
+# OTP画面の特徴語。ログイン直後にこれらが出ていたら自動化はそこで止まる。
+OTP_HINTS = ["認証コード", "確認コード", "ワンタイム", "メールに送信", "6桁"]
+
+
+def detect_otp(page) -> str | None:
+    """メール認証コード画面かどうかを判定し、当たった手掛かりを返す。"""
+    try:
+        body = page.inner_text("body")[:4000]
+    except Exception:
+        return None
+    for h in OTP_HINTS:
+        if h in body:
+            return h
+    return None
+
+
 def fetch_csv(ym: str) -> bytes:
     company = C.env("ULEJI_COMPANY"); user = C.env("ULEJI_USER"); pw = C.env("ULEJI_PASS")
     with sync_playwright() as p:
@@ -42,12 +58,24 @@ def fetch_csv(ym: str) -> bytes:
         page = ctx.new_page()
         _open(page, company, user, pw)
 
+        otp = detect_otp(page)
+        if otp:
+            print(f"[uleji] ★メール認証コード(OTP)画面を検出: {otp}")
+
         if C.is_diag():
             page.wait_for_timeout(2000)
-            C.diag_dump(page, "uleji_00_dashboard")
+            C.diag_dump(page, "uleji_00_afterlogin")
+            print(f"[uleji][diag] OTP画面か: {'YES' if otp else 'NO'}")
             browser.close()
-            print("[uleji] POS_DIAG: 画面を diag/ に出力しました")
             return b""
+
+        if otp:
+            C.diag_dump(page, "uleji_otp_block")
+            browser.close()
+            raise RuntimeError(
+                "[uleji] ログイン後にメール認証コード(OTP)を要求されたため自動取得できません。"
+                "README『新UレジのOTP対策』の方針決定待ちです"
+            )
 
         # ---- 実取得: 売上/原価CSVのエクスポート（TODO: 診断出力で確定）----
         with page.expect_download() as dl_info:
