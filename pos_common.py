@@ -128,6 +128,19 @@ def diag_dump(page, tag: str, outdir: str = "diag"):
         print(f"[diag] {tag}: クリック候補 {len(uniq)}件を {outdir}/{tag}_clickables.txt へ")
     except Exception as e:
         print(f"[diag] clickable列挙失敗 {tag}: {e}")
+    # 画面内リンク（href付き）— エクスポート画面のURLを直接特定するため
+    try:
+        links = page.evaluate("""() => [...document.querySelectorAll('a[href]')]
+            .map(el => ((el.innerText||'').trim().slice(0,30)) + '\\t' + el.getAttribute('href'))""")
+        seen, uniq = set(), []
+        for t in links:
+            if t not in seen:
+                seen.add(t); uniq.append(t)
+        with open(f"{outdir}/{tag}_links.tsv", "w", encoding="utf-8") as f:
+            f.write("text\thref\n" + "\n".join(uniq))
+        print(f"[diag] {tag}: リンク {len(uniq)}件を {outdir}/{tag}_links.tsv へ")
+    except Exception as e:
+        print(f"[diag] link列挙失敗 {tag}: {e}")
 
 def is_diag() -> bool:
     return os.environ.get("POS_DIAG", "") in ("1", "true", "yes")

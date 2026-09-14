@@ -2,57 +2,65 @@
 dinii_sync.py — ダイニー管理画面から売上/原価CSVを取得してシートへ
 使い方:  python dinii_sync.py [YYYY-MM]
 Secrets: DINII_USER(=ログイン用メールアドレス) / DINII_PASS  （+ 出力先 TARGET_SHEET_ID か ローカルCSV）
-ログイン欄は実画面（SPA）に確定済み：メールアドレス / パスワード / 「ログイン」ボタン。
-売上レポートへの導線・CSV列マッピングは POS_DIAG=1 の診断出力を見て確定する（下部 TODO）。
+ログインは「フォームがあれば入力、無ければ既ログインとみなして続行」の寛容方式。
+売上/原価CSVは左メニュー「データ出力・連携」から。導線とCSV列は診断出力(POS_DIAG=1)で確定する。
 """
 import sys, os
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 import pos_common as C
 
 DINII_LOGIN_URL = os.environ.get("DINII_LOGIN_URL") or "https://dashboard.self.dinii.jp/"
 
 
-def _login(page, user: str, pw: str):
-    page.goto(DINII_LOGIN_URL, wait_until="networkidle")
-    # SPA。placeholderで確実に掴む（大文字小文字/空白は正規化されて一致）。
-    email = page.get_by_placeholder("メールアドレス")
-    email.wait_for(state="visible", timeout=30000)
-    email.fill(user)
-    # パスワード欄は type=password を優先、無ければplaceholder
+def _open(page, user: str, pw: str):
+    """ダッシュボードを開く。ログインフォームが出たら入力、出なければ既ログインとして続行。"""
+    page.goto(DINII_LOGIN_URL, wait_until="domcontentloaded")
+    # ログインフォーム or ダッシュボードのどちらかが出るまで最大15秒待つ
     try:
-        page.locator("input[type='password']").first.fill(pw)
+        page.wait_for_selector("input[placeholder*='メール'], :text(\"データ出力・連携\")", timeout=15000)
     except Exception:
-        page.get_by_placeholder("パスワード").fill(pw)
-    page.get_by_role("button", name="ログイン").click()
-    page.wait_for_load_state("networkidle")
+        pass
+    page.wait_for_timeout(1500)
+    email = page.locator("input[placeholder*='メール']")
+    if email.count() > 0:  # ログインが必要
+        if not (user and pw):
+            raise RuntimeError("DINII_USER(メールアドレス) / DINII_PASS を設定してください")
+        email.first.fill(user)
+        try:
+            page.locator("input[type='password']").first.fill(pw)
+        except Exception:
+            page.get_by_placeholder("パスワード").fill(pw)
+        page.get_by_role("button", name="ログイン").click()
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(2000)
+    # ここまで来たらダッシュボードにいる想定
 
 
 def fetch_csv(ym: str) -> bytes:
     user = C.env("DINII_USER"); pw = C.env("DINII_PASS")
-    if not (user and pw):
-        raise RuntimeError("DINII_USER(メールアドレス) / DINII_PASS を設定してください")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
-        try:
-            _login(page, user, pw)
-        except PWTimeout:
-            C.diag_dump(page, "dinii_login_fail")
-            raise RuntimeError("[dinii] ログイン画面の要素が見つからない。diag/dinii_login_fail.* を確認")
+        _open(page, user, pw)
 
-        # 診断モード：ログイン後の画面を吐いて終了（エクスポート導線の確定用）
+        # 診断モード：ダッシュボード＋「データ出力・連携」を開いて中身を吐いて終了
         if C.is_diag():
-            page.wait_for_timeout(3000)
-            C.diag_dump(page, "dinii_after_login")
+            page.wait_for_timeout(2000)
+            C.diag_dump(page, "dinii_00_dashboard")
+            try:
+                page.get_by_text("データ出力・連携", exact=False).first.click()
+                page.wait_for_timeout(2500)
+                C.diag_dump(page, "dinii_01_dataexport")
+            except Exception as e:
+                print(f"[dinii][diag] データ出力・連携クリック失敗: {e}")
             browser.close()
-            print("[dinii] POS_DIAG: ログイン後の画面を diag/ に出力しました")
+            print("[dinii] POS_DIAG: 画面を diag/ に出力しました")
             return b""
 
-        # ---- 2) 売上レポート → CSVエクスポート導線（TODO: 診断出力を見て確定）----
-        # 例: page.get_by_role("link", name="売上").click()
-        #     page.get_by_role("link", name="レポート").click()
-        #     page.fill(<期間セレクタ>, ym)
+        # ---- 実取得: 売上/原価CSVのエクスポート（TODO: 診断出力で確定）----
+        page.get_by_text("データ出力・連携", exact=False).first.click()
+        page.wait_for_timeout(1500)
         with page.expect_download() as dl_info:
             page.click("text=CSV")  # TODO: エクスポートボタンの実セレクタ
         data = open(dl_info.value.path(), "rb").read()
@@ -68,7 +76,7 @@ def normalize(rows: list[dict], ym: str) -> list[dict]:
         uri  = r.get("売上") or r.get("純売上") or r.get("sales")               # TODO
         f    = r.get("原価_フード") or r.get("food_cost") or ""                 # TODO(無ければ空)
         d    = r.get("原価_ドリンク") or r.get("drink_cost") or ""              # TODO
-        kyaku= r.get("客数") or r.get("guests") or ""                           # TODO
+        kyaku= r.get("客数") or r.get("来店客数") or r.get("guests") or ""       # TODO
         if not name:
             continue
         out.append({

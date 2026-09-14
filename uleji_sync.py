@@ -2,55 +2,54 @@
 uleji_sync.py — 新Uレジ(USENレジ)管理画面から売上/原価CSVを取得してシートへ
 使い方:  python uleji_sync.py [YYYY-MM]
 Secrets: ULEJI_COMPANY(=企業コード) / ULEJI_USER(=担当者コード) / ULEJI_PASS(=パスワード)
-         （+ 出力先 TARGET_SHEET_ID か ローカルCSV）
-ログイン欄は実画面に確定済み：企業コード / 担当者コード / パスワード / 「ログイン」ボタン。
-売上レポートへの導線・CSV列マッピングは POS_DIAG=1 の診断出力を見て確定する（下部 TODO）。
+ログインは「フォームがあれば入力、無ければ既ログインとみなして続行」の寛容方式。
+売上/原価CSVの導線・列は診断出力(POS_DIAG=1)で確定する。
 """
 import sys, os
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 import pos_common as C
 
 ULEJI_LOGIN_URL = os.environ.get("ULEJI_LOGIN_URL") or "https://pos.usen-regi.com/cms/login/init"
 
 
-def _login(page, company: str, user: str, pw: str):
-    page.goto(ULEJI_LOGIN_URL, wait_until="networkidle")
-    # 3欄ログイン。placeholderで確実に掴む。
-    page.get_by_placeholder("企業コードを入力").wait_for(state="visible", timeout=30000)
-    page.get_by_placeholder("企業コードを入力").fill(company)
-    page.get_by_placeholder("担当者コードを入力").fill(user)
-    # パスワードは type=password を優先
+def _open(page, company: str, user: str, pw: str):
+    page.goto(ULEJI_LOGIN_URL, wait_until="domcontentloaded")
     try:
-        page.locator("input[type='password']").first.fill(pw)
+        page.wait_for_selector("input[placeholder*='企業コード'], input[type='password']", timeout=15000)
     except Exception:
-        page.get_by_placeholder("パスワードを入力").fill(pw)
-    page.get_by_role("button", name="ログイン").click()
-    page.wait_for_load_state("networkidle")
+        pass
+    page.wait_for_timeout(1500)
+    comp = page.get_by_placeholder("企業コードを入力")
+    if comp.count() > 0:  # ログインが必要
+        if not (company and user and pw):
+            raise RuntimeError("ULEJI_COMPANY(企業コード) / ULEJI_USER(担当者コード) / ULEJI_PASS を設定してください")
+        comp.fill(company)
+        page.get_by_placeholder("担当者コードを入力").fill(user)
+        try:
+            page.locator("input[type='password']").first.fill(pw)
+        except Exception:
+            page.get_by_placeholder("パスワードを入力").fill(pw)
+        page.get_by_role("button", name="ログイン").click()
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(2000)
 
 
 def fetch_csv(ym: str) -> bytes:
     company = C.env("ULEJI_COMPANY"); user = C.env("ULEJI_USER"); pw = C.env("ULEJI_PASS")
-    if not (company and user and pw):
-        raise RuntimeError("ULEJI_COMPANY(企業コード) / ULEJI_USER(担当者コード) / ULEJI_PASS を設定してください")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
-        try:
-            _login(page, company, user, pw)
-        except PWTimeout:
-            C.diag_dump(page, "uleji_login_fail")
-            raise RuntimeError("[uleji] ログイン画面の要素が見つからない。diag/uleji_login_fail.* を確認")
+        _open(page, company, user, pw)
 
-        # 診断モード：ログイン後の画面を吐いて終了（エクスポート導線の確定用）
         if C.is_diag():
-            page.wait_for_timeout(3000)
-            C.diag_dump(page, "uleji_after_login")
+            page.wait_for_timeout(2000)
+            C.diag_dump(page, "uleji_00_dashboard")
             browser.close()
-            print("[uleji] POS_DIAG: ログイン後の画面を diag/ に出力しました")
+            print("[uleji] POS_DIAG: 画面を diag/ に出力しました")
             return b""
 
-        # ---- 2) 売上レポート → CSVエクスポート導線（TODO: 診断出力を見て確定）----
+        # ---- 実取得: 売上/原価CSVのエクスポート（TODO: 診断出力で確定）----
         with page.expect_download() as dl_info:
             page.click("text=CSV")  # TODO: エクスポートボタンの実セレクタ
         data = open(dl_info.value.path(), "rb").read()
@@ -66,7 +65,7 @@ def normalize(rows: list[dict], ym: str) -> list[dict]:
         uri  = r.get("売上") or r.get("純売上") or r.get("sales")               # TODO
         f    = r.get("原価_フード") or r.get("food_cost") or ""                 # TODO(無ければ空)
         d    = r.get("原価_ドリンク") or r.get("drink_cost") or ""              # TODO
-        kyaku= r.get("客数") or r.get("guests") or ""                           # TODO
+        kyaku= r.get("客数") or r.get("来店客数") or r.get("guests") or ""       # TODO
         if not name:
             continue
         out.append({
