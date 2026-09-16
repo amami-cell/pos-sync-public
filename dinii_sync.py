@@ -214,6 +214,9 @@ def _explore(page, path: str, tag: str):
         C.diag_dump(page, tag)
         for word in ("ダウンロード", "CSV", "エクスポート", "出力"):
             C.probe_elements(page, word, limit=3)
+        # ダイニーのDLボタンは aria-label="download" のアイコンのみ。
+        # 文字で探しても引っかからないので、アイコン側からも探す
+        C.probe_icon_buttons(page)
         # 画面に原価らしき語があるかを確認（数字は出さない）
         try:
             body = page.inner_text("body")
@@ -299,6 +302,12 @@ def fetch_csv(ym: str) -> bytes:
             print("==== 原価の在り処を探索 ====")
             for path, tag in EXPLORE_PATHS:
                 _explore(page, path, tag)
+            # ログのtailは後続ステップで埋まりやすいので、要点をここで再掲する
+            print("==== diniiまとめ ====")
+            print(f"  日計CSV: {'取得できた' if data else '取得できず'}"
+                  f"{'（原価の列は無し。売上と客数のみ）' if data else ''}")
+            print("  原価の在り処: /bi/flDashboard に 原価/フード/ドリンク/理論原価 の語あり")
+            print("  → 上の [icon] 一覧に download 系のアイコンがあれば、そこが出力導線")
             browser.close()
             return b""
 

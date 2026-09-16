@@ -614,3 +614,28 @@ def probe_checkboxes(page, limit: int = 40):
     print(f"[checkbox] チェックボックス {len(info)}件（番号/状態/ラベル）")
     for t in info:
         print(f"    | {t}")
+
+
+def probe_icon_buttons(page, limit: int = 20):
+    """文字を持たないアイコンだけのボタンを列挙する。
+    ダイニーのDLボタンは aria-label="download" のアイコンボタンで、
+    テキスト検索では引っかからない。原価画面の出力導線を探すのに要る。"""
+    try:
+        info = page.evaluate(
+            r"""(lim) => [...document.querySelectorAll('button,a,[role=button]')]
+                .map((el, i) => {
+                    const txt = (el.innerText || '').trim().replace(/\s+/g, ' ');
+                    const icon = el.querySelector('[aria-label],[data-icon],svg');
+                    const label = icon ? (icon.getAttribute('aria-label')
+                        || icon.getAttribute('data-icon') || '') : '';
+                    const own = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+                    if (!label && !own) return '';
+                    return i + '\t' + (el.disabled ? 'disabled' : 'enabled')
+                        + '\ticon=' + (label || own) + '\ttext=' + (txt.slice(0, 30) || '(なし)');
+                }).filter(Boolean).slice(0, lim)""", limit)
+    except Exception as e:
+        print(f"[icon] 列挙に失敗: {e}")
+        return
+    print(f"[icon] アイコン付きボタン {len(info)}件（番号/状態/アイコン名/テキスト）")
+    for t in info:
+        print(f"    | {t}")
