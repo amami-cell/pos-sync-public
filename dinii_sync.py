@@ -250,7 +250,12 @@ def fetch_csv(ym: str) -> bytes:
                 if data:
                     break
             if data:
-                C.describe_csv(data, "dinii_export_sample")
+                # 解析に失敗しても正体だけは掴めるよう、ここで止めない
+                print(f"[dinii][diag] 取得: {C.sniff_bytes(data)}")
+                try:
+                    C.describe_csv(data, "dinii_export_sample")
+                except Exception as e:
+                    print(f"[dinii][diag] CSV解析に失敗: {type(e).__name__}: {e}")
             else:
                 print("[dinii][diag] 自動ダウンロード不成立。上の『クリック候補』からボタン名を確定します")
             browser.close()

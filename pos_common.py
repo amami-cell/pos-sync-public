@@ -35,15 +35,68 @@ def env(*keys: str) -> str | None:
 # 店舗名→店舗コードの対応表はここには持たない。
 # hansoku の店舗マスタを唯一の正とし、下部の load_stores() で実行時に読む。
 
-def parse_csv_bytes(data: bytes, encodings=("utf-8-sig", "cp932", "utf-8")) -> list[dict]:
-    """POSのCSV（UTF-8/Shift_JIS両対応）を辞書リストに。"""
+ENCODINGS = ("utf-8-sig", "cp932", "utf-8", "euc-jp")
+
+
+def sniff_bytes(data: bytes) -> str:
+    """落ちてきたファイルの正体を、中身を出さずに見分ける。
+    公開リポジトリのログに載るので、売上そのものは出さない。"""
+    head = data[:8]
+    if head[:4] == b"PK\x03\x04":
+        kind = "ZIP（複数店舗のCSVがまとまっている可能性）"
+    elif head[:2] == b"\x1f\x8b":
+        kind = "gzip"
+    elif head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        kind = "UTF-16（BOM付き）"
+    elif head[:3] == b"\xef\xbb\xbf":
+        kind = "UTF-8（BOM付き）"
+    elif head[:5] == b"%PDF-":
+        kind = "PDF"
+    elif head[:2] == b"\xd0\xcf":
+        kind = "古いExcel(.xls)"
+    else:
+        try:
+            data[:400].decode("utf-8")
+            kind = "テキスト（UTF-8）"
+        except UnicodeDecodeError:
+            kind = "テキストではない、または別の文字コード"
+    return f"{len(data)}バイト / 先頭8バイト={head.hex()} / 推定={kind}"
+
+
+def _decode_csv(data: bytes, encodings=ENCODINGS) -> list[dict]:
     for enc in encodings:
         try:
-            text = data.decode(enc)
-            return list(csv.DictReader(io.StringIO(text)))
+            return list(csv.DictReader(io.StringIO(data.decode(enc))))
         except UnicodeDecodeError:
             continue
-    raise ValueError("CSVの文字コードを判別できませんでした（utf-8-sig/cp932/utf-8で失敗）")
+    raise ValueError(f"CSVの文字コードを判別できませんでした（{'/'.join(encodings)}で失敗）")
+
+
+def parse_csv_bytes(data: bytes, encodings=ENCODINGS) -> list[dict]:
+    """POSのCSVを辞書リストに。ZIPで来る場合は中のCSVをすべて展開して連結する。
+    ダイニーは『複数店舗の場合はZIP』と画面に明記されており、実際ZIPで来る。"""
+    if data[:4] == b"PK\x03\x04":
+        import zipfile
+        rows: list[dict] = []
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            names = [n for n in z.namelist() if not n.endswith("/")]
+            print(f"[csv] ZIPを展開: {len(names)}ファイル")
+            for n in names:
+                print(f"    | {n}")
+            for n in names:
+                if not n.lower().endswith(".csv"):
+                    continue
+                part = _decode_csv(z.read(n), encodings)
+                # どのファイル由来かを残す。店舗別ZIPだと店名がファイル名にある
+                for r in part:
+                    r.setdefault("_source_file", n)
+                rows.extend(part)
+        if not rows:
+            raise ValueError("ZIPの中にCSVが見つかりませんでした")
+        return rows
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return _decode_csv(data, ("utf-16",) + encodings)
+    return _decode_csv(data, encodings)
 
 # ---- 出力1: ローカルCSV（既存GASが取り込む運用に合わせる場合）----
 def write_local_csv(rows: list[dict], path: str):
@@ -206,6 +259,7 @@ def describe_csv(data: bytes, tag: str, outdir: str = "diag") -> list[str]:
     if want_diag_files():
         with open(f"{outdir}/{tag}.csv", "wb") as f:
             f.write(data)   # 中身は売上そのもの。既定では保存しない
+    print(f"[diag:{tag}] 取得したファイル: {sniff_bytes(data)}")
     rows = parse_csv_bytes(data)
     header = list(rows[0].keys()) if rows else []
     print(f"[diag:{tag}] CSV {len(rows)}行 / {len(header)}列")
