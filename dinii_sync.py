@@ -13,6 +13,8 @@ import pos_common as C
 DINII_LOGIN_URL = os.environ.get("DINII_LOGIN_URL") or "https://dashboard.self.dinii.jp/"
 # 確定済み: 売上/原価の集計CSV。/onlinePaymentCsv/export はモバイル決済取引なので使わない。
 EXPORT_PATH = "/aggregatedData/daily/export"
+# 画面に「集計完了まで数分かかる場合があります」と明記されているため長めに取る
+DL_TIMEOUT_MS = 300000
 
 # ダウンロードボタンの候補。効いたものは診断ログに出るので、確定後は先頭に寄せる。
 DL_SELECTORS = [
@@ -95,23 +97,64 @@ def _fill_picker(page, placeholder: str, value: str) -> bool:
 
 
 def _set_period(page, ym: str):
-    """対象月を期間欄に入れる。実画面は Ant Design の DatePicker で、
-    プレースホルダは「開始日付」「終了日付」（type=date ではない）。
-    書式が環境で違いうるので YYYY-MM-DD → YYYY/MM/DD の順に試す。"""
+    """対象月を期間欄に入れる。実画面には日付欄が2系統ある:
+      - 日付を選択 (#aggregatedDataByShopsForm_targetDate) … 店舗横断集計が使う
+      - 開始日付 / 終了日付                                  … 店舗別集計が使う
+    どちらの帳票を落とすか決め打ちできないので、両方に入れる。
+    Ant Design の DatePicker なので クリック→入力→Enter で入れる。"""
     import calendar
     y, m = int(ym.split("-")[0]), int(ym.split("-")[1])
     last_day = calendar.monthrange(y, m)[1]
+    ok = False
     for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
         first = datetime.date(y, m, 1).strftime(fmt)
         last = datetime.date(y, m, last_day).strftime(fmt)
-        ok_s = _fill_picker(page, "開始日付", first)
-        ok_e = _fill_picker(page, "終了日付", last)
-        if ok_s and ok_e:
-            page.wait_for_timeout(1200)
+        got_s = _fill_picker(page, "開始日付", first)
+        got_e = _fill_picker(page, "終了日付", last)
+        # 店舗横断集計側。範囲ではなく単日/月の可能性があるため月初を入れる
+        got_t = _fill_picker(page, "日付を選択", first)
+        if got_s and got_e:
+            ok = True
+        if ok or got_t:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(800)
             return True
         print(f"[dinii] 書式 {fmt} では入らず。次の書式を試します")
     print("[dinii] 期間欄に入力できませんでした（画面の既定期間のまま進みます）")
     return False
+
+
+def _select_all_shops(page):
+    """店舗選択の「全選択」を入れる。全90店舗が対象。
+    未選択だとダウンロードボタンが無効なままになる。"""
+    try:
+        loc = page.get_by_text("全選択", exact=True)
+        if loc.count() > 0:
+            loc.first.click()
+            page.wait_for_timeout(1500)
+            print("[dinii] 店舗を全選択しました")
+            return True
+    except Exception as e:
+        print(f"[dinii] 全選択の操作に失敗（続行）: {e}")
+    return False
+
+
+def _list_shops(page):
+    """店舗名の一覧をログへ。STORE_MAP（店舗表記→財務prefix）を埋めるのに要る。"""
+    try:
+        names = page.evaluate(
+            r"""() => [...document.querySelectorAll('label,li,.ant-checkbox-wrapper')]
+                .map(el => (el.innerText || '').trim().replace(/\s+/g, ' '))
+                .filter(t => t && t.length <= 40 && t !== '全選択')""")
+        uniq = []
+        for n in names:
+            if n not in uniq:
+                uniq.append(n)
+        print(f"[dinii] 店舗候補 {len(uniq)}件")
+        for n in uniq[:120]:
+            print(f"    | {n}")
+    except Exception as e:
+        print(f"[dinii] 店舗一覧の取得に失敗: {e}")
 
 
 def fetch_csv(ym: str) -> bytes:
@@ -145,6 +188,8 @@ def fetch_csv(ym: str) -> bytes:
             # 正体（所属フォーム・近傍見出し・HTML）と、未入力の欄を洗い出す。
             C.probe_elements(page, "ダウンロード")
             C.probe_form_state(page)
+            _list_shops(page)
+            _select_all_shops(page)
             _set_period(page, ym)
             page.keyboard.press("Escape")  # 日付パネルが開いたままだとボタンを覆う
             page.wait_for_timeout(800)
@@ -154,8 +199,8 @@ def fetch_csv(ym: str) -> bytes:
             C.probe_cards(page, "ダウンロード")
             # どのボタンが本命か不明なので、押せるものを順に試して結果を記録する
             data = None
-            for i in range(4):
-                data, note = C.click_and_watch(page, i)
+            for i in range(2):  # 1回最大5分待つため回数を絞る
+                data, note = C.click_and_watch(page, i, timeout_ms=DL_TIMEOUT_MS)
                 print(f"[dinii][diag] {note}")
                 if data:
                     break
@@ -169,8 +214,9 @@ def fetch_csv(ym: str) -> bytes:
 
         # ---- 実取得 ----
         _goto_export(page)
+        _select_all_shops(page)
         _set_period(page, ym)
-        data, sel = C.try_download(page, DL_SELECTORS, timeout_ms=30000)
+        data, sel = C.try_download(page, DL_SELECTORS, timeout_ms=DL_TIMEOUT_MS)
         if not data:
             C.diag_dump(page, "dinii_dl_fail")
             browser.close()
