@@ -141,7 +141,9 @@ def fetch_csv(ym: str) -> bytes:
 
 def normalize(rows: list[dict], ym: str) -> list[dict]:
     """新UレジCSVの列名 -> 共通スキーマ。TODO: 実CSVのヘッダに合わせてキーを対応付け。"""
+    idx = C.build_store_index(C.load_stores())
     out = []
+    unresolved = []
     for r in rows:
         name = r.get("店舗名") or r.get("店舗") or r.get("shop_name")          # TODO
         uri  = r.get("売上") or r.get("純売上") or r.get("sales")               # TODO
@@ -150,10 +152,18 @@ def normalize(rows: list[dict], ym: str) -> list[dict]:
         kyaku= r.get("客数") or r.get("来店客数") or r.get("guests") or ""       # TODO
         if not name:
             continue
+        code = C.resolve_store_code(name, idx)
+        if not code and name not in unresolved:
+            unresolved.append(name)
         out.append({
             "年月": ym, "店舗名": name, "売上": uri, "フード原価": f,
             "ドリンク原価": d, "客数": kyaku, "備考": "", "取込日時": C.now_str(), "POS": "uleji",
+            "店舗コード": code,
         })
+    if unresolved:
+        print(f"[uleji] 店舗マスタに無い表記 {len(unresolved)}件（店舗コードは空のまま取り込む）:")
+        for n in unresolved:
+            print(f"    | {n}")
     return out
 
 

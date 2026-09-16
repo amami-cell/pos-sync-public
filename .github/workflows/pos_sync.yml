@@ -8,7 +8,11 @@ on:
         description: '対象月 YYYY-MM（空なら先月）'
         required: false
       diag:
-        description: '診断モード（ログイン後の画面をartifactに出力。導線確定用）: 1 で有効'
+        description: '診断モード（画面構造をログに出力。導線確定用）: 1 で有効'
+        required: false
+        default: ''
+      diag_files:
+        description: 'スクショ/HTML/CSVも残す: 1 で有効。売上が写り込むので必要な時だけ'
         required: false
         default: ''
 jobs:
@@ -20,7 +24,7 @@ jobs:
         with: { python-version: '3.12' }
       - name: install
         run: |
-          pip install playwright gspread google-auth pandas
+          pip install playwright gspread google-auth pandas pyyaml
           python -m playwright install --with-deps chromium
       - name: dinii
         env:
@@ -30,6 +34,7 @@ jobs:
           TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
           GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
           POS_DIAG: ${{ github.event.inputs.diag }}
+          POS_DIAG_FILES: ${{ github.event.inputs.diag_files }}
         run: python dinii_sync.py "${{ github.event.inputs.month }}"
       - name: uleji
         if: always()
@@ -41,6 +46,7 @@ jobs:
           TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
           GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
           POS_DIAG: ${{ github.event.inputs.diag }}
+          POS_DIAG_FILES: ${{ github.event.inputs.diag_files }}
         run: python uleji_sync.py "${{ github.event.inputs.month }}"
       - name: diag-summary
         if: always()
@@ -50,7 +56,8 @@ jobs:
           echo "=== diag/ に出力されたファイル ==="
           ls -la diag/ 2>/dev/null || echo "(diag/ なし)"
       - name: upload-diag
-        if: always()
+        # 画面の写しは明示的に要求されたときだけ上げる（公開リポジトリのため）
+        if: always() && github.event.inputs.diag_files == '1' 
         uses: actions/upload-artifact@v4
         with:
           name: pos-diag

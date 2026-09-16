@@ -11,7 +11,8 @@ import os, csv, io, datetime, json, unicodedata
 
 # ---- 共通スキーマ（既存FW→シートと揃える）----
 # 年月, 店舗名, 売上, フード原価(F), ドリンク原価(D), 客数, 備考, 取込日時, POS
-COLUMNS = ["年月", "店舗名", "売上", "フード原価", "ドリンク原価", "客数", "備考", "取込日時", "POS"]
+COLUMNS = ["年月", "店舗名", "売上", "フード原価", "ドリンク原価", "客数", "備考", "取込日時", "POS",
+           "店舗コード"]  # 店舗コードは末尾に追加。既存列の順序は変えていない
 
 def last_month(ym: str | None = None) -> str:
     """対象月 YYYY-MM。未指定なら先月（締め後の当月分を翌月頭に回す運用向け）。"""
@@ -31,21 +32,8 @@ def env(*keys: str) -> str | None:
             return v
     return None
 
-# ---- 店舗名 → 財務店舗コード（prefix）対応。CSVの店舗表記に合わせて随時追記 ----
-# 例: dinii/UレジのCSVに出る店舗名 : 財務prefix
-STORE_MAP = {
-    # "ひよこ飯店": "0001069",
-    # "ちゃーちゃん": "0001111",
-    # "料理と酒 たいだい": "0001137",
-    # ... 管理画面CSVの実表記を見てここに追記
-}
-
-def to_prefix(name: str) -> str | None:
-    n = norm_name(name)
-    for k, v in STORE_MAP.items():
-        if norm_name(k) == n or norm_name(k) in n or n in norm_name(k):
-            return v
-    return None
+# 店舗名→店舗コードの対応表はここには持たない。
+# hansoku の店舗マスタを唯一の正とし、下部の load_stores() で実行時に読む。
 
 def parse_csv_bytes(data: bytes, encodings=("utf-8-sig", "cp932", "utf-8")) -> list[dict]:
     """POSのCSV（UTF-8/Shift_JIS両対応）を辞書リストに。"""
@@ -121,19 +109,30 @@ def _echo(tag: str, label: str, items: list[str]):
         print(f"    | {t}")
 
 
+def want_diag_files() -> bool:
+    """スクショとHTMLを残すか。既定は残さない。
+    これらは管理画面をそのまま写すため売上の数字が写り込みうる。
+    公開リポジトリでは実行ログもartifactも誰でも見られるので、
+    既定では作らず、必要なときだけ POS_DIAG_FILES=1 で明示的に有効化する。"""
+    return os.environ.get("POS_DIAG_FILES", "") in ("1", "true", "yes")
+
+
 def diag_dump(page, tag: str, outdir: str = "diag"):
     import os as _os
     _os.makedirs(outdir, exist_ok=True)
     print(f"[diag:{tag}] URL = {page.url}")
-    try:
-        page.screenshot(path=f"{outdir}/{tag}.png", full_page=True)
-    except Exception as e:
-        print(f"[diag:{tag}] screenshot失敗: {e}")
-    try:
-        with open(f"{outdir}/{tag}.html", "w", encoding="utf-8") as f:
-            f.write(page.content())
-    except Exception as e:
-        print(f"[diag:{tag}] html失敗: {e}")
+    if want_diag_files():
+        try:
+            page.screenshot(path=f"{outdir}/{tag}.png", full_page=True)
+        except Exception as e:
+            print(f"[diag:{tag}] screenshot失敗: {e}")
+        try:
+            with open(f"{outdir}/{tag}.html", "w", encoding="utf-8") as f:
+                f.write(page.content())
+        except Exception as e:
+            print(f"[diag:{tag}] html失敗: {e}")
+    else:
+        print(f"[diag:{tag}] スクショ/HTMLは既定で残しません（必要なら POS_DIAG_FILES=1）")
 
     # クリック候補（メニュー/ボタン/リンクのテキスト）
     try:
@@ -202,8 +201,9 @@ def describe_csv(data: bytes, tag: str, outdir: str = "diag") -> list[str]:
     """落ちたCSVを diag/ に保存し、列名（＝スキーマ）だけをログに出す。数値データはログに出さない。"""
     import os as _os
     _os.makedirs(outdir, exist_ok=True)
-    with open(f"{outdir}/{tag}.csv", "wb") as f:
-        f.write(data)
+    if want_diag_files():
+        with open(f"{outdir}/{tag}.csv", "wb") as f:
+            f.write(data)   # 中身は売上そのもの。既定では保存しない
     rows = parse_csv_bytes(data)
     header = list(rows[0].keys()) if rows else []
     print(f"[diag:{tag}] CSV {len(rows)}行 / {len(header)}列")
@@ -465,3 +465,76 @@ def click_and_watch(page, index: int, text: str = "ダウンロード", timeout_
         if msgs:
             note += " / 画面のメッセージ: " + " | ".join(msgs)
         return None, note
+
+
+# ---- 店舗マスタ（hansoku の config/stores.yaml を参照する）----
+# 店舗名→店舗コードの対応を自前で持つと二重管理になり、店の増減で必ずズレる。
+# 販促ダッシュボード(hansoku)が既に持っているマスタを唯一の正とし、
+# 公開リポジトリの raw URL から実行時に読む。コピーは置かない。
+#   store_code  … FW(Foodist Journal)の店舗コード。実績データの結合キー
+#   aliases/yomi/source_name/infomart_name … 表記ゆれの吸収に使う
+#   pos         … fw / uleji / dainy（FW未連動の店の実績の出どころ）
+STORES_YAML_URL = (
+    os.environ.get("STORES_YAML_URL")
+    or "https://raw.githubusercontent.com/amami-cell/hansoku/main/config/stores.yaml"
+)
+
+
+def load_stores() -> list[dict]:
+    """店舗マスタを取得して辞書のリストで返す。取得できなければ空リスト。"""
+    import urllib.request
+    try:
+        import yaml
+    except ImportError:
+        print("[stores] PyYAML が無いため店舗マスタを読めません")
+        return []
+    try:
+        with urllib.request.urlopen(STORES_YAML_URL, timeout=30) as r:
+            data = yaml.safe_load(r.read().decode("utf-8"))
+        stores = data.get("stores", []) if isinstance(data, dict) else []
+        print(f"[stores] 店舗マスタを取得: {len(stores)}件")
+        return stores
+    except Exception as e:
+        print(f"[stores] 店舗マスタの取得に失敗（店舗コードは空で続行）: {e}")
+        return []
+
+
+def build_store_index(stores: list[dict]) -> dict[str, str]:
+    """照合用の索引を作る。表記ゆれ（別名・読み・コード付き名・インフォマート名）を
+    すべて同じ店舗コードに向ける。"""
+    idx: dict[str, str] = {}
+
+    def put(key, code):
+        k = norm_name(key)
+        if k and k not in idx:
+            idx[k] = code
+
+    for s in stores:
+        code = str(s.get("store_code", "") or "").strip()
+        if not code:
+            continue
+        put(s.get("store_name", ""), code)
+        put(s.get("infomart_name", ""), code)
+        for a in (s.get("aliases") or []):
+            put(a, code)
+        for y in (s.get("yomi") or []):
+            put(y, code)
+        src = str(s.get("source_name", "") or "")
+        if "_" in src:                      # "0001069_ひよこ飯店" → "ひよこ飯店"
+            put(src.split("_", 1)[1], code)
+        put(src, code)
+    return idx
+
+
+def resolve_store_code(name: str, idx: dict[str, str]) -> str:
+    """POSのCSVに出る店舗表記から店舗コードを引く。
+    完全一致で引けなければ、片方がもう片方を含む形で緩く照合する。"""
+    if not name or not idx:
+        return ""
+    n = norm_name(name)
+    if n in idx:
+        return idx[n]
+    for key, code in idx.items():
+        if len(key) >= 3 and (key in n or n in key):
+            return code
+    return ""
