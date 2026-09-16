@@ -1,0 +1,71 @@
+name: POS売上取込（ダイニー/新Uレジ）
+on:
+  schedule:
+    - cron: '0 20 5 * *'   # 毎月6日 05:00 JST（UTC 前日20:00）。締め後に実行
+  workflow_dispatch:
+    inputs:
+      month:
+        description: '対象月 YYYY-MM（空なら先月）'
+        required: false
+      diag:
+        description: '診断モード（画面構造をログに出力。導線確定用）: 1 で有効'
+        required: false
+        default: ''
+      diag_files:
+        description: 'スクショ/HTML/CSVも残す: 1 で有効。売上が写り込むので必要な時だけ'
+        required: false
+        default: ''
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: install
+        run: |
+          pip install playwright gspread google-auth pandas pyyaml
+          python -m playwright install --with-deps chromium
+      - name: dinii
+        env:
+          DINII_LOGIN_URL: ${{ secrets.DINII_LOGIN_URL }}
+          DINII_USER: ${{ secrets.DINII_USER }}
+          DINII_PASS: ${{ secrets.DINII_PASS }}
+          TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
+          GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+          POS_DIAG: ${{ github.event.inputs.diag }}
+          POS_DIAG_FILES: ${{ github.event.inputs.diag_files }}
+        run: python dinii_sync.py "${{ github.event.inputs.month }}"
+      - name: uleji
+        if: always()
+        env:
+          ULEJI_LOGIN_URL: ${{ secrets.ULEJI_LOGIN_URL }}
+          ULEJI_COMPANY: ${{ secrets.ULEJI_COMPANY }}
+          ULEJI_USER: ${{ secrets.ULEJI_USER }}
+          ULEJI_PASS: ${{ secrets.ULEJI_PASS }}
+          TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
+          GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+          OTP_IMAP_HOST: ${{ secrets.OTP_IMAP_HOST }}
+          OTP_IMAP_USER: ${{ secrets.OTP_IMAP_USER }}
+          OTP_IMAP_PASS: ${{ secrets.OTP_IMAP_PASS }}
+          OTP_IMAP_PORT: ${{ secrets.OTP_IMAP_PORT }}
+          OTP_IMAP_FOLDER: ${{ secrets.OTP_IMAP_FOLDER }}
+          OTP_SUBJECT_HINT: ${{ secrets.OTP_SUBJECT_HINT }}
+          POS_DIAG: ${{ github.event.inputs.diag }}
+          POS_DIAG_FILES: ${{ github.event.inputs.diag_files }}
+        run: python uleji_sync.py "${{ github.event.inputs.month }}"
+      - name: diag-summary
+        if: always()
+        run: |
+          # 中身は各スクリプトが標準出力に echo 済み。ここで再掲すると
+          # ログのtailが埋まって本体の出力が読めなくなるので一覧だけ。
+          echo "=== diag/ に出力されたファイル ==="
+          ls -la diag/ 2>/dev/null || echo "(diag/ なし)"
+      - name: upload-diag
+        # 画面の写しは明示的に要求されたときだけ上げる（公開リポジトリのため）
+        if: always() && github.event.inputs.diag_files == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pos-diag
+          path: diag/
+          if-no-files-found: ignore
