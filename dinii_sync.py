@@ -124,18 +124,56 @@ def _set_period(page, ym: str):
     return False
 
 
-def _select_all_shops(page):
-    """店舗選択の「全選択」を入れる。全90店舗が対象。
-    未選択だとダウンロードボタンが無効なままになる。"""
+def _dl_state(page, when: str):
+    """ダウンロードボタンの活性状態をログへ。どの操作で押せるようになるかを突き止める。"""
     try:
-        loc = page.get_by_text("全選択", exact=True)
-        if loc.count() > 0:
-            loc.first.click()
-            page.wait_for_timeout(1500)
-            print("[dinii] 店舗を全選択しました")
-            return True
+        btns = page.locator("button:has-text('ダウンロード')")
+        n = btns.count()
+        states = []
+        for i in range(min(n, 4)):
+            states.append(f"[{i}]{'disabled' if btns.nth(i).is_disabled() else '★ENABLED'}")
+        print(f"[dinii] DLボタン（{when}）: {' '.join(states) if states else '見つからず'}")
     except Exception as e:
-        print(f"[dinii] 全選択の操作に失敗（続行）: {e}")
+        print(f"[dinii] ボタン状態の取得に失敗（{when}）: {e}")
+
+
+def _ensure_checked(page, label: str) -> bool:
+    """ラベルに対応するチェックボックスを確実にONにする。
+    既にONなら押さない。Ant Design のチェックボックスはトグルなので、
+    ONの状態で押すと外れる（run #1 で「全選択」を押して全解除していた）。"""
+    for sel in (f".ant-checkbox-wrapper:has-text('{label}')",
+                f"label:has-text('{label}')"):
+        loc = page.locator(sel)
+        if loc.count() == 0:
+            continue
+        el = loc.first
+        box = el.locator("input[type=checkbox]")
+        try:
+            if box.count() > 0 and box.first.is_checked():
+                print(f"[dinii] 「{label}」は既にON（押さない）")
+                return True
+            el.click()
+            page.wait_for_timeout(1200)
+            on = box.count() > 0 and box.first.is_checked()
+            print(f"[dinii] 「{label}」をクリック → {'ON' if on else 'OFFのまま'}")
+            return on
+        except Exception as e:
+            print(f"[dinii] 「{label}」の操作に失敗: {e}")
+    print(f"[dinii] 「{label}」が見つかりません")
+    return False
+
+
+def _select_all_shops(page) -> bool:
+    """店舗選択の「全選択」をONにする。未選択だとDLボタンが無効のまま。"""
+    return _ensure_checked(page, "全選択")
+
+
+def _select_output_file(page) -> bool:
+    """出力ファイル選択。欲しいのは店舗横断の日計 summaryByShops.csv。
+    画面の文言は「日計(日別・店舗統一)(summaryByShops.csv)」。"""
+    for label in ("summaryByShops.csv", "日計(日別・店舗統一)", "店舗統一"):
+        if _ensure_checked(page, label):
+            return True
     return False
 
 
@@ -189,10 +227,17 @@ def fetch_csv(ym: str) -> bytes:
             C.probe_elements(page, "ダウンロード")
             C.probe_form_state(page)
             _list_shops(page)
+            # どの操作でDLボタンが押せるようになるかを1段ずつ確かめる
+            _dl_state(page, "初期")
             _select_all_shops(page)
+            _dl_state(page, "全選択後")
             _set_period(page, ym)
             page.keyboard.press("Escape")  # 日付パネルが開いたままだとボタンを覆う
             page.wait_for_timeout(800)
+            _dl_state(page, "期間指定後")
+            _select_output_file(page)
+            _dl_state(page, "出力ファイル選択後")
+            C.probe_form_state(page)
             C.diag_dump(page, "dinii_02_after_period")
             print("---- 期間指定後の状態 ----")
             C.probe_elements(page, "ダウンロード")
@@ -215,6 +260,10 @@ def fetch_csv(ym: str) -> bytes:
         _goto_export(page)
         _select_all_shops(page)
         _set_period(page, ym)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(800)
+        _select_output_file(page)
+        _dl_state(page, "実取得の直前")
         data, sel = C.try_download(page, DL_SELECTORS, timeout_ms=DL_TIMEOUT_MS)
         if not data:
             C.diag_dump(page, "dinii_dl_fail")
