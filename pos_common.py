@@ -87,9 +87,11 @@ def now_str() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # ---- 診断: 画面の構造を diag/ に保存し、要点はジョブログにも出す ----
-# POS_DIAG=1 のとき、スクショ・HTML・クリック候補・リンク・入力欄一覧を ./diag/ に保存する。
-# artifact が取得できない環境でも導線を確定できるよう、要点は標準出力にも echo する
-# （このリポジトリは private なのでジョブログは外部に出ない）。
+# POS_DIAG=1 のとき、画面構造（クリック候補・リンク・ボタン・入力欄）を ./diag/ に保存し、
+# 要点は標準出力にも echo する（artifactを開けない環境でも導線を確定できるように）。
+# ⚠ このリポジトリは public。実行ログもartifactも誰でも見られる。
+#   売上の数字が写るもの（スクショ・HTML・CSVの実体）は want_diag_files() で既定オフ。
+#   入力欄の value と認証情報は、どのモードでも出力しない。
 DIAG_ECHO_MAX = 60  # ログに出す最大件数（多すぎるログを防ぐ）
 
 
@@ -208,7 +210,7 @@ def describe_csv(data: bytes, tag: str, outdir: str = "diag") -> list[str]:
     header = list(rows[0].keys()) if rows else []
     print(f"[diag:{tag}] CSV {len(rows)}行 / {len(header)}列")
     _echo(tag, "CSV列名", header)
-    # 店舗名らしき列の値だけは STORE_MAP を埋めるのに要るので、その列のユニーク値を出す
+    # 店舗名の表記は、店舗マスタとの照合確認に要るのでユニーク値だけ出す（数値は出さない）
     for key in header:
         if any(k in key for k in ("店舗", "店名", "shop", "store")):
             vals = _uniq([str(r.get(key, "")).strip() for r in rows])

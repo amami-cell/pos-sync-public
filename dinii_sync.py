@@ -140,7 +140,7 @@ def _select_all_shops(page):
 
 
 def _list_shops(page):
-    """店舗名の一覧をログへ。STORE_MAP（店舗表記→財務prefix）を埋めるのに要る。"""
+    """店舗名の一覧をログへ。店舗マスタとの照合確認に使う。"""
     try:
         names = page.evaluate(
             r"""() => [...document.querySelectorAll('label,li,.ant-checkbox-wrapper')]
@@ -205,7 +205,6 @@ def fetch_csv(ym: str) -> bytes:
                 if data:
                     break
             if data:
-                print(f"[dinii][diag] ダウンロード成功（効いたセレクタ: {sel}）")
                 C.describe_csv(data, "dinii_export_sample")
             else:
                 print("[dinii][diag] 自動ダウンロード不成立。上の『クリック候補』からボタン名を確定します")
