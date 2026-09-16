@@ -195,6 +195,37 @@ def _list_shops(page):
         print(f"[dinii] 店舗一覧の取得に失敗: {e}")
 
 
+# 原価の在り処を探す候補。診断で見つかったリンクより。
+#   /bi/flDashboard … 経営管理。FL=Food&Labor cost、原価はここにある可能性が高い
+# 日計CSV(90列)には原価の列が1つも無かったため、別画面を当たる必要がある。
+EXPLORE_PATHS = [
+    ("/bi/flDashboard", "dinii_10_fl"),
+    ("/aggregatedData/menu/export", "dinii_11_menu_export"),
+]
+
+
+def _explore(page, path: str, tag: str):
+    """指定パスを開いて構造を吐く。原価が取れる画面と導線を特定するため。"""
+    base = _base()
+    try:
+        page.goto(base + path, wait_until="domcontentloaded")
+        page.wait_for_timeout(4000)
+        print(f"[dinii][探索] {path} → 実際のURL {page.url}")
+        C.diag_dump(page, tag)
+        for word in ("ダウンロード", "CSV", "エクスポート", "出力"):
+            C.probe_elements(page, word, limit=3)
+        # 画面に原価らしき語があるかを確認（数字は出さない）
+        try:
+            body = page.inner_text("body")
+            hits = [w for w in ("原価", "FL", "粗利", "F/L", "フード", "ドリンク", "理論原価")
+                    if w in body]
+            print(f"[dinii][探索] {path} に出てくる語: {hits if hits else 'なし'}")
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[dinii][探索] {path} の調査に失敗: {e}")
+
+
 def fetch_csv(ym: str) -> bytes:
     user = C.env("DINII_USER"); pw = C.env("DINII_PASS")
     with sync_playwright() as p:
@@ -264,6 +295,10 @@ def fetch_csv(ym: str) -> bytes:
                     print(f"[dinii][diag] CSV解析に失敗: {type(e).__name__}: {e}")
             else:
                 print("[dinii][diag] 自動ダウンロード不成立。上の『クリック候補』からボタン名を確定します")
+            # 日計CSVに原価が無かったので、原価が取れる画面を探す
+            print("==== 原価の在り処を探索 ====")
+            for path, tag in EXPLORE_PATHS:
+                _explore(page, path, tag)
             browser.close()
             return b""
 
