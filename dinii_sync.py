@@ -235,8 +235,14 @@ def fetch_csv(ym: str) -> bytes:
             page.keyboard.press("Escape")  # 日付パネルが開いたままだとボタンを覆う
             page.wait_for_timeout(800)
             _dl_state(page, "期間指定後")
+            # 「出力ファイル選択」の選択肢を文言つきで確定する。
+            # 店舗横断集計は日付1日ぶんしか出ない（落ちたファイル名が ...-20260801.csv）。
+            # 月次で取るには 開始日付/終了日付 を持つ「店舗別集計」側を使う必要があり、
+            # そのカードのDLボタン[1]を有効にする条件を突き止める。
+            C.probe_checkboxes(page)
             _select_output_file(page)
             _dl_state(page, "出力ファイル選択後")
+            C.probe_checkboxes(page)
             C.probe_form_state(page)
             C.diag_dump(page, "dinii_02_after_period")
             print("---- 期間指定後の状態 ----")

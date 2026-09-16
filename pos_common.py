@@ -156,9 +156,9 @@ def _uniq(seq):
     return out
 
 
-def _echo(tag: str, label: str, items: list[str]):
+def _echo(tag: str, label: str, items: list[str], limit: int | None = None):
     """診断結果の要点をジョブログへ。件数が多いときは先頭のみ。"""
-    shown = items[:DIAG_ECHO_MAX]
+    shown = items[: (limit or DIAG_ECHO_MAX)]
     print(f"[diag:{tag}] {label} ({len(items)}件" + (f"、先頭{len(shown)}件を表示" if len(shown) < len(items) else "") + ")")
     for t in shown:
         print(f"    | {t}")
@@ -263,7 +263,7 @@ def describe_csv(data: bytes, tag: str, outdir: str = "diag") -> list[str]:
     rows = parse_csv_bytes(data)
     header = list(rows[0].keys()) if rows else []
     print(f"[diag:{tag}] CSV {len(rows)}行 / {len(header)}列")
-    _echo(tag, "CSV列名", header)
+    _echo(tag, "CSV列名", header, limit=200)   # 列マッピング確定のため全部出す
     # 店舗名の表記は、店舗マスタとの照合確認に要るのでユニーク値だけ出す（数値は出さない）
     for key in header:
         if any(k in key for k in ("店舗", "店名", "shop", "store")):
@@ -594,3 +594,23 @@ def resolve_store_code(name: str, idx: dict[str, str]) -> str:
         if len(key) >= 3 and (key in n or n in key):
             return code
     return ""
+
+
+def probe_checkboxes(page, limit: int = 40):
+    """チェックボックスをラベル文言つきで列挙する。
+    「出力ファイル選択」にどの帳票が並んでいて、どれがONかを確定するため。"""
+    try:
+        info = page.evaluate(
+            r"""(lim) => [...document.querySelectorAll('input[type=checkbox]')]
+                .slice(0, lim)
+                .map((el, i) => {
+                    const w = el.closest('label') || el.closest('.ant-checkbox-wrapper') || el.parentElement;
+                    const t = ((w && w.innerText) || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+                    return i + '	' + (el.checked ? 'ON ' : 'off') + '	' + (t || '(ラベルなし)');
+                })""", limit)
+    except Exception as e:
+        print(f"[checkbox] 列挙に失敗: {e}")
+        return
+    print(f"[checkbox] チェックボックス {len(info)}件（番号/状態/ラベル）")
+    for t in info:
+        print(f"    | {t}")
