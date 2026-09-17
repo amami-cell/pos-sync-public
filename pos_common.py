@@ -87,6 +87,10 @@ def parse_csv_bytes(data: bytes, encodings=ENCODINGS) -> list[dict]:
                 if not n.lower().endswith(".csv"):
                     continue
                 part = _decode_csv(z.read(n), encodings)
+                cols = list(part[0].keys()) if part else []
+                print(f"[csv] {n}: {len(part)}行 / {len(cols)}列")
+                for c in cols[:60]:
+                    print(f"        - {c}")
                 # どのファイル由来かを残す。店舗別ZIPだと店名がファイル名にある
                 for r in part:
                     r.setdefault("_source_file", n)

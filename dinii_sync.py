@@ -169,12 +169,20 @@ def _select_all_shops(page) -> bool:
 
 
 def _select_output_file(page) -> bool:
-    """出力ファイル選択。欲しいのは店舗横断の日計 summaryByShops.csv。
-    画面の文言は「日計(日別・店舗統一)(summaryByShops.csv)」。"""
+    """出力ファイル選択。売上・客数は日計(summaryByShops.csv)から取れている。
+    原価がどの帳票に入るかが未確定なので、候補も一緒に選んで1回のZIPで確かめる。
+    出数集計は商品別の出数で、原価が入っているならここが最有力。"""
+    ok = False
     for label in ("summaryByShops.csv", "日計(日別・店舗統一)", "店舗統一"):
         if _ensure_checked(page, label):
-            return True
-    return False
+            ok = True
+            break
+    # 原価の在り処を1回で突き止めるため、商品まわりの帳票も選ぶ
+    for label in ("出数集計", "orderSummary.csv"):
+        if _ensure_checked(page, label):
+            _note("[出力ファイル選択] 出数集計も一緒に選んだ（原価列の有無を確認するため）")
+            break
+    return ok
 
 
 def _list_shops(page):
