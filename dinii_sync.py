@@ -198,6 +198,56 @@ def _list_shops(page):
 # 原価の在り処を探す候補。診断で見つかったリンクより。
 #   /bi/flDashboard … 経営管理。FL=Food&Labor cost、原価はここにある可能性が高い
 # 日計CSV(90列)には原価の列が1つも無かったため、別画面を当たる必要がある。
+FINDINGS: list[str] = []
+
+
+def _note(line: str):
+    """あとでまとめて出す調査メモ。"""
+    FINDINGS.append(line)
+
+
+def _mask_numbers(text: str) -> str:
+    """数字を伏せる。公開リポジトリのログに売上・原価の実数を残さないため。
+    項目名や画面の構造だけが残る。"""
+    import re
+    return re.sub(r"[0-9０-９][0-9０-９,，.．%％]*", "#", text)
+
+
+def _collect_checkbox_labels(page):
+    """出力ファイル選択に並ぶ帳票の名前を全部拾う。"""
+    try:
+        labels = page.evaluate(
+            r"""() => [...document.querySelectorAll('input[type=checkbox]')].map(el => {
+                const w = el.closest('label') || el.closest('.ant-checkbox-wrapper') || el.parentElement;
+                return ((w && w.innerText) || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+            }).filter(Boolean)""")
+        uniq = []
+        for t in labels:
+            if t not in uniq:
+                uniq.append(t)
+        _note(f"[出力ファイル選択] 選べる帳票 {len(uniq)}件:")
+        for t in uniq:
+            _note(f"      - {t}")
+        return uniq
+    except Exception as e:
+        _note(f"[出力ファイル選択] 取得に失敗: {e}")
+        return []
+
+
+def _collect_cost_context(page, path: str):
+    """原価まわりの画面テキストを、数字を伏せた形で拾う。
+    どんな項目名で原価が並んでいるかを知るため。"""
+    try:
+        lines = [l.strip() for l in page.inner_text("body").split("\n") if l.strip()]
+        hit = [l for l in lines
+               if any(w in l for w in ("原価", "フード", "ドリンク", "粗利", "FL"))]
+        _note(f"[{path}] 原価まわりの表示 {len(hit)}行（数字は伏せています）:")
+        for l in hit[:25]:
+            _note(f"      - {_mask_numbers(l)[:90]}")
+    except Exception as e:
+        _note(f"[{path}] 画面テキストの取得に失敗: {e}")
+
+
 EXPLORE_PATHS = [
     ("/bi/flDashboard", "dinii_10_fl"),
     ("/aggregatedData/menu/export", "dinii_11_menu_export"),
@@ -217,6 +267,7 @@ def _explore(page, path: str, tag: str):
         # ダイニーのDLボタンは aria-label="download" のアイコンのみ。
         # 文字で探しても引っかからないので、アイコン側からも探す
         C.probe_icon_buttons(page)
+        _collect_cost_context(page, path)
         # 画面に原価らしき語があるかを確認（数字は出さない）
         try:
             body = page.inner_text("body")
@@ -274,6 +325,7 @@ def fetch_csv(ym: str) -> bytes:
             # 月次で取るには 開始日付/終了日付 を持つ「店舗別集計」側を使う必要があり、
             # そのカードのDLボタン[1]を有効にする条件を突き止める。
             C.probe_checkboxes(page)
+            _collect_checkbox_labels(page)
             _select_output_file(page)
             _dl_state(page, "出力ファイル選択後")
             C.probe_checkboxes(page)
@@ -303,11 +355,10 @@ def fetch_csv(ym: str) -> bytes:
             for path, tag in EXPLORE_PATHS:
                 _explore(page, path, tag)
             # ログのtailは後続ステップで埋まりやすいので、要点をここで再掲する
-            print("==== diniiまとめ ====")
-            print(f"  日計CSV: {'取得できた' if data else '取得できず'}"
-                  f"{'（原価の列は無し。売上と客数のみ）' if data else ''}")
-            print("  原価の在り処: /bi/flDashboard に 原価/フード/ドリンク/理論原価 の語あり")
-            print("  → 上の [icon] 一覧に download 系のアイコンがあれば、そこが出力導線")
+            print("==== diniiまとめ（ここが結論） ====")
+            print(f"  日計CSV: {'取得できた（原価の列は無し。売上と客数のみ）' if data else '取得できず'}")
+            for line in FINDINGS:
+                print("  " + line)
             browser.close()
             return b""
 
