@@ -256,6 +256,49 @@ def _collect_cost_context(page, path: str):
         _note(f"[{path}] 画面テキストの取得に失敗: {e}")
 
 
+def _cost_coverage(page):
+    """店舗ごとに原価が反映されているかを判定する。
+    経営管理画面には店舗別に「原価率：」が並ぶ。値が空・ハイフン・0% なら
+    その店は原価が未設定＝反映できていない。
+    率そのものは出さず、店舗名と 反映あり/未反映 だけをログに出す。"""
+    js = r"""() => {
+        const zenkaku = v => v.replace(/[０-９．％]/g, c =>
+            '0123456789.%'['０１２３４５６７８９．％'.indexOf(c)]);
+        const isEmpty = v => {
+            const h = zenkaku(v).trim();
+            return h === '' || h === '-' || h === '—' || h === '未設定'
+                || /^0(\.0+)?%?$/.test(h);
+        };
+        const out = [];
+        const leaves = [...document.querySelectorAll('*')].filter(el =>
+            el.children.length === 0 && /原価率[：:]/.test(el.textContent || ''));
+        for (const n of leaves) {
+            let p = n.parentElement, card = null;
+            for (let i = 0; i < 6 && p; i++, p = p.parentElement) {
+                if (((p.innerText || '').trim()).length > 20) { card = p; break; }
+            }
+            const raw = (card ? card.innerText : (n.textContent || ''));
+            const text = raw.split('\n').map(x => x.trim()).filter(Boolean).join(' / ');
+            const m = text.match(/原価率[：:]\s*([^\/\s]*)/);
+            const name = (text.split(' / ')[0] || '').slice(0, 40) || '(店舗名不明)';
+            out.push(name + '\t' + (isEmpty(m ? m[1] : '') ? '未反映' : '反映あり'));
+        }
+        return out;
+    }"""
+    try:
+        rows = page.evaluate(js)
+        uniq = []
+        for r in rows:
+            if r not in uniq:
+                uniq.append(r)
+        ng = [r for r in uniq if r.endswith("未反映")]
+        _note(f"[原価の反映状況] 店舗 {len(uniq)}件中 未反映 {len(ng)}件")
+        for r in uniq:
+            _note(f"      - {r}")
+    except Exception as e:
+        _note(f"[原価の反映状況] 判定に失敗: {e}")
+
+
 EXPLORE_PATHS = [
     ("/bi/flDashboard", "dinii_10_fl"),
     ("/aggregatedData/menu/export", "dinii_11_menu_export"),
@@ -276,6 +319,8 @@ def _explore(page, path: str, tag: str):
         # 文字で探しても引っかからないので、アイコン側からも探す
         C.probe_icon_buttons(page)
         _collect_cost_context(page, path)
+        if "flDashboard" in path:
+            _cost_coverage(page)
         # 画面に原価らしき語があるかを確認（数字は出さない）
         try:
             body = page.inner_text("body")
