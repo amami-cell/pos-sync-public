@@ -258,45 +258,87 @@ def _collect_cost_context(page, path: str):
 
 def _cost_coverage(page):
     """店舗ごとに原価が反映されているかを判定する。
-    経営管理画面には店舗別に「原価率：」が並ぶ。値が空・ハイフン・0% なら
-    その店は原価が未設定＝反映できていない。
+    経営管理画面のカードは「原価率：」がラベルだけの要素で、値は隣の要素にある。
+    ラベルと同じ行に値が無いときは次の行を値として読む（前回はここを取り違えて
+    全店を「未反映」と誤判定した）。
     率そのものは出さず、店舗名と 反映あり/未反映 だけをログに出す。"""
     js = r"""() => {
-        const zenkaku = v => v.replace(/[０-９．％]/g, c =>
-            '0123456789.%'['０１２３４５６７８９．％'.indexOf(c)]);
+        const zen = v => v.replace(/[０-９．％－]/g, c =>
+            '0123456789.%-'['０１２３４５６７８９．％－'.indexOf(c)]);
         const isEmpty = v => {
-            const h = zenkaku(v).trim();
-            return h === '' || h === '-' || h === '—' || h === '未設定'
-                || /^0(\.0+)?%?$/.test(h);
+            const h = zen(String(v)).trim();
+            return h === '' || h === '-' || h === '--' || h === '—' || h === '未設定'
+                || h === 'N/A' || /^0(\.0+)?\s*%?$/.test(h);
         };
+        const isRank = s => /^[\d\s\-–—.、]+$/.test(s);
+        const lines = el => (el.innerText || '').split('\n')
+            .map(x => x.trim()).filter(Boolean);
+        const seen = new Set();
         const out = [];
         const leaves = [...document.querySelectorAll('*')].filter(el =>
-            el.children.length === 0 && /原価率[：:]/.test(el.textContent || ''));
+            el.children.length === 0 && /原価率/.test(el.textContent || ''));
         for (const n of leaves) {
+            // カードは「行が3本以上ある最初の祖先」。文字数で決めると
+            // 店名が短い店だけ判定を外して body まで昇ってしまう。
             let p = n.parentElement, card = null;
-            for (let i = 0; i < 6 && p; i++, p = p.parentElement) {
-                if (((p.innerText || '').trim()).length > 20) { card = p; break; }
+            for (let i = 0; i < 8 && p; i++, p = p.parentElement) {
+                if (p === document.body || p === document.documentElement) break;
+                if (lines(p).length >= 3) { card = p; break; }
             }
-            const raw = (card ? card.innerText : (n.textContent || ''));
-            const text = raw.split('\n').map(x => x.trim()).filter(Boolean).join(' / ');
-            const m = text.match(/原価率[：:]\s*([^\/\s]*)/);
-            const name = (text.split(' / ')[0] || '').slice(0, 40) || '(店舗名不明)';
-            out.push(name + '\t' + (isEmpty(m ? m[1] : '') ? '未反映' : '反映あり'));
+            if (!card) continue;   // カードを特定できないものは判定しない
+            if (seen.has(card)) continue;
+            seen.add(card);
+            const segs = lines(card);
+            const i = segs.findIndex(s => /原価率/.test(s));
+            let val = '';
+            if (i >= 0) {
+                // 「原価率：28.5%」のように同じ行に値があればそれを、
+                // 「原価率：」だけの行なら次の行を値とみなす。ただし次の行が
+                // 別の項目名（例「客数」）なら値ではない＝空として扱う。
+                const looksValue = v => /^[-–—]+$/.test(v.trim())
+                    || /^[0-9.,]+\s*%?$/.test(zen(v).trim());
+                const tail = zen(segs[i]).replace(/^[\s\S]*原価率[：:]?/, '')
+                                          .replace(/^[\s\/]+/, '').trim();
+                const next = segs[i + 1] || '';
+                val = tail || (looksValue(next) ? next : '');
+            }
+            const before = i > 0 ? segs.slice(0, i) : segs;
+            const name = (before.find(s => !isRank(s) && !/原価率/.test(s))
+                          || '(店舗名不明)').slice(0, 40);
+            out.push({
+                name: name,
+                ok: !isEmpty(val),
+                segs: segs.slice(0, 5),
+            });
         }
         return out;
     }"""
     try:
         rows = page.evaluate(js)
-        uniq = []
-        for r in rows:
-            if r not in uniq:
-                uniq.append(r)
-        ng = [r for r in uniq if r.endswith("未反映")]
-        _note(f"[原価の反映状況] 店舗 {len(uniq)}件中 未反映 {len(ng)}件")
-        for r in uniq:
-            _note(f"      - {r}")
     except Exception as e:
         _note(f"[原価の反映状況] 判定に失敗: {e}")
+        return
+    if not rows:
+        _note("[原価の反映状況] 「原価率」を含むカードが見つからず、判定できなかった")
+        return
+    uniq, keys = [], set()
+    for r in rows:
+        k = (r["name"], r["ok"])
+        if k in keys:
+            continue
+        keys.add(k)
+        uniq.append(r)
+    ng = [r for r in uniq if not r["ok"]]
+    _note(f"[原価の反映状況] 店舗 {len(uniq)}件中 未反映 {len(ng)}件")
+    for r in uniq:
+        _note(f"      - {r['name']}\t{'反映あり' if r['ok'] else '未反映'}")
+    # 前回は読み取り位置がずれて全件が「未反映」になった。同じ壊れ方を
+    # 見逃さないよう、全件同じ判定のときはカードの構造も（数字を伏せて）出す。
+    if uniq and (len(ng) == len(uniq) or len(ng) == 0):
+        _note("      ※ 全件が同じ判定。読み取り位置がずれている可能性があるので"
+              "カードの構造を確認する（数字は伏せる）:")
+        for r in uniq[:3]:
+            _note(f"        {_mask_numbers(' | '.join(r['segs']))}")
 
 
 EXPLORE_PATHS = [
