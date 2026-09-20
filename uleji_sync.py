@@ -85,6 +85,24 @@ def _screen_report(page, label: str):
         lines = [l.strip() for l in body.split("\n") if l.strip()]
         for l in lines[:14]:
             _note(f"      - {C.mask_numbers(l)[:90]}")
+    # 入力欄（期間指定の場所を特定するため）。値は出さない。
+    try:
+        fields = page.evaluate(
+            r"""() => [...document.querySelectorAll('input, select')]
+                .filter(el => el.type !== 'hidden')
+                .map(el => [el.tagName.toLowerCase(), el.type || '', el.name || '',
+                            el.id || '', el.placeholder || ''].join('/'))""")
+        uniq = []
+        for f in fields:
+            if f not in uniq:
+                uniq.append(f)
+        if uniq:
+            _note(f"[{label}] 入力欄 {len(uniq)}件（tag/type/name/id/placeholder）:")
+            for f in uniq[:20]:
+                _note(f"      - {f}")
+    except Exception as e:
+        _note(f"[{label}] 入力欄の列挙に失敗: {e}")
+
     # 押せるもの（CSV出力はアイコンだけのこともある）
     try:
         btns = page.evaluate(
@@ -210,6 +228,28 @@ def _explore_analytics(page, tag: str):
     予算登録など書き込みの画面には入らない。"""
     _note("[分析] ここは別サイト（analytics-pc.usen-regi.com）。原価はここにある")
     _cost_lines(page, "分析")
+    # このSPAはリンクが<a>ではないので、DOM中のhrefを総ざらいして画面を探す
+    try:
+        hrefs = page.evaluate(
+            r"""() => [...new Set([...document.querySelectorAll('[href]')]
+                .map(e => e.getAttribute('href')).filter(Boolean))]""")
+        _note(f"[分析] 画面へのリンク {len(hrefs)}件: {' / '.join(hrefs[:30])}")
+    except Exception as e:
+        _note(f"[分析] リンクの列挙に失敗: {e}")
+    # 隠れているものも含めて、押せる候補の名前を全部出す（原価の画面を探すため）
+    try:
+        allnames = page.evaluate(
+            r"""() => [...new Set([...document.querySelectorAll(
+                'button, [role=button], [role=tab], [role=menuitem], li, [class*=nav], [class*=menu]')]
+                .map(e => (e.getAttribute('aria-label') || e.getAttribute('title')
+                           || (e.childElementCount === 0 ? e.textContent : '') || '')
+                          .trim().replace(/\s+/g, ' '))
+                .filter(t => t && t.length < 24))]""")
+        _note(f"[分析] 画面にある名前 {len(allnames)}件: "
+              f"{C.mask_numbers(' / '.join(allnames[:40]))}")
+    except Exception as e:
+        _note(f"[分析] 名前の列挙に失敗: {e}")
+
     for name in ("詳細を表示", "View as data table, Chart"):
         if any(ng in name for ng in FORBIDDEN):
             continue
