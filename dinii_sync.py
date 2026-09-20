@@ -214,11 +214,7 @@ def _note(line: str):
     FINDINGS.append(line)
 
 
-def _mask_numbers(text: str) -> str:
-    """数字を伏せる。公開リポジトリのログに売上・原価の実数を残さないため。
-    項目名や画面の構造だけが残る。"""
-    import re
-    return re.sub(r"[0-9０-９][0-9０-９,，.．%％]*", "#", text)
+_mask_numbers = C.mask_numbers   # 共通側へ移した（ulejiでも使うため）
 
 
 def _collect_checkbox_labels(page):

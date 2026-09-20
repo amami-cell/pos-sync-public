@@ -341,6 +341,13 @@ def probe_form_state(page):
         print(f"  | {d['type']}\tid={d['id']}\tname={d['name']}\tph={d['ph']}\t空={d['empty']}{chk}")
 
 
+def mask_numbers(text: str) -> str:
+    """数字を伏せる。公開リポジトリのログに売上・原価の実数を残さないため。
+    項目名や画面の構造だけが残る。"""
+    import re
+    return re.sub(r"[0-9０-９][0-9０-９,，.．%％]*", "#", text)
+
+
 # ---- OTP(メール認証コード)の自動取得 ----
 # 新Uレジはログイン後にメールで届く認証コードを要求する。管理画面側で
 # 無効化できないため、実行しているプロセス自身がメールから取りに行く。

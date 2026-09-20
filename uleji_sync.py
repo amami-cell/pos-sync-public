@@ -11,6 +11,58 @@ import pos_common as C
 
 ULEJI_LOGIN_URL = os.environ.get("ULEJI_LOGIN_URL") or "https://pos.usen-regi.com/cms/login/init"
 
+FINDINGS: list[str] = []
+
+
+def _note(line: str):
+    """あとでまとめて出す調査メモ。ログのtailが後続ステップで埋まるので、
+    結論はステップの最後にまとめて出す。"""
+    FINDINGS.append(line)
+
+
+def _base() -> str:
+    from urllib.parse import urlsplit
+    u = urlsplit(ULEJI_LOGIN_URL)
+    return f"{u.scheme}://{u.netloc}"
+
+
+# OTP突破後に見えたメニュー（run #12）。売上CSVの出口を探す候補。
+#   売上管理 → 伝票明細 / 収入印紙 / 過去売上実績
+#   分析  … 売上・原価・客数の集計はここの可能性が高い
+EXPLORE_PATHS = [
+    ("/cms/side-menu/analysis-system", "uleji_10_analysis"),
+    ("/cms/side-menu/slip-list", "uleji_11_slip"),
+    ("/cms/side-menu/past-sales-regist", "uleji_12_past_sales"),
+]
+
+
+def _explore(page, path: str, tag: str):
+    """指定パスを開いて構造を出す。CSVの出口と期間指定の場所を特定するため。
+    数字は伏せる（このリポジトリは公開のため）。"""
+    try:
+        page.goto(_base() + path, wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
+        print(f"[uleji][探索] {path} → 実際のURL {page.url}")
+        C.diag_dump(page, tag)
+        for word in ("CSV", "ダウンロード", "エクスポート", "出力", "検索"):
+            C.probe_elements(page, word, limit=3)
+        C.probe_icon_buttons(page)
+        C.probe_form_state(page)
+        try:
+            body = page.inner_text("body")
+            hits = [w for w in ("原価", "売上", "客数", "来客", "食材", "粗利",
+                                "CSV", "ダウンロード", "出力", "期間")
+                    if w in body]
+            _note(f"[{path}] 画面に出てくる語: {hits if hits else 'なし'}")
+            lines = [l.strip() for l in body.split("\n") if l.strip()]
+            _note(f"[{path}] 画面の行（先頭12行・数字は伏せています）:")
+            for l in lines[:12]:
+                _note(f"      - {C.mask_numbers(l)[:90]}")
+        except Exception:
+            pass
+    except Exception as e:
+        _note(f"[{path}] 調査に失敗: {e}")
+
 
 def _submit_otp(page) -> bool:
     """メールで届く認証コードを取得して入力し、認証まで進める。
@@ -132,10 +184,17 @@ def fetch_csv(ym: str) -> bytes:
                 try:
                     _submit_otp(page)
                     C.diag_dump(page, "uleji_01_after_otp")
+                    _note("認証コードの自動入力に成功。管理画面に入れている")
                     C.probe_elements(page, "CSV")
                     C.probe_elements(page, "ダウンロード")
+                    for path, tag in EXPLORE_PATHS:
+                        _explore(page, path, tag)
                 except Exception as e:
                     print(f"[uleji][diag] OTP突破に失敗: {e}")
+                    _note(f"OTP突破に失敗: {e}")
+            print("==== ulejiまとめ（ここが結論） ====")
+            for line in FINDINGS:
+                print(f"  {line}")
             browser.close()
             return b""
 
