@@ -350,14 +350,13 @@ EXPLORE_PATHS = [
 ]
 
 
-def _find_cost_export(page):
-    """経営管理の画面から「CSVダウンロード」へ辿る。
-    URLを当てずに、画面にあるリンク・ボタンから探す（当て推量のURLはSPAを
-    壊すことがある。新Uレジでセッションごと落とした）。"""
-    # 文字とhrefを対にして出す。hrefだけだと、どれが「CSVダウンロード」か分からない。
-    # 折りたたまれたメニューの中にあるはずなので、隠れているものも含めて全部出す。
+
+def _links_with_text(page) -> list[str]:
+    """画面のリンクを「文字 → href」で返す。折りたたまれて隠れているものも含む
+    （[隠] を付ける）。グループ見出しを開くと子リンクが増えるので、開く前後の
+    差分を取るのに使う。"""
     try:
-        pairs = page.evaluate(
+        return page.evaluate(
             r"""() => {
                 const seen = new Set(), out = [];
                 for (const a of document.querySelectorAll('a[href]')) {
@@ -373,62 +372,107 @@ def _find_cost_export(page):
                 }
                 return out;
             }""")
-        _note(f"[経営管理] 画面内のリンク {len(pairs)}件（文字→href、[隠]は非表示）:")
-        for t in pairs[:40]:
-            _note(f"      - {t}")
-    except Exception as e:
-        _note(f"[経営管理] リンクの列挙に失敗: {e}")
+    except Exception:
+        return []
 
-    # サポートの案内は「ダッシュボード ＞ 経営管理タブ ＞ CSVダウンロード」。
-    # 経営管理の配下に入らないと CSVダウンロード が現れない可能性が高いので、
-    # まずナビの項目名を全部出し、経営管理を開いてから探す。
+
+def _click_group(page, text: str) -> bool:
+    """折りたたまれた見出しだけを開く。**リンク（href持ち）は押さない**。
+    見出しのつもりで実リンクを押すと画面が変わり、開いたメニューごと消える。"""
     try:
-        navs = page.evaluate(
-            r"""() => [...new Set([...document.querySelectorAll(
-                'a, button, [role=menuitem], [role=tab], li')]
-                .filter(e => e.offsetParent !== null)
-                .map(e => (e.getAttribute('aria-label') || e.getAttribute('title')
-                           || e.textContent || '').trim().replace(/\s+/g, ' '))
-                .filter(t => t && t.length <= 20))]""")
-        _note(f"[経営管理] 画面にある項目 {len(navs)}件: {_mask_numbers(' / '.join(navs[:40]))}")
-    except Exception as e:
-        _note(f"[経営管理] 項目の列挙に失敗: {e}")
-    for opener in ("経営管理", "分析", "レポート"):
+        hit = page.evaluate(
+            r"""(label) => {
+                document.querySelectorAll('[data-claude-group]')
+                    .forEach(e => e.removeAttribute('data-claude-group'));
+                const els = [...document.querySelectorAll('*')].filter(
+                    el => el.children.length === 0 &&
+                          (el.textContent || '').trim() === label &&
+                          el.offsetParent !== null);
+                for (const el of els) {
+                    if (el.closest('a[href]')) continue;   // 実リンクは触らない
+                    el.setAttribute('data-claude-group', '1');
+                    return true;
+                }
+                return false;
+            }""", text)
+        if not hit:
+            return False
+        page.locator("[data-claude-group='1']").first.click(timeout=4000)
+        return True
+    except Exception:
+        return False
+
+
+def _click_label(page, text: str) -> bool:
+    """見えている文字をクリックする。役割を決め打ちしない。"""
+    for make in (lambda: page.get_by_role("link", name=text, exact=True),
+                 lambda: page.get_by_role("button", name=text, exact=True),
+                 lambda: page.get_by_text(text, exact=True)):
         try:
-            loc = page.get_by_text(opener, exact=True)
+            loc = make()
             for i in range(min(loc.count(), 3)):
                 if loc.nth(i).is_visible():
                     loc.nth(i).click(timeout=4000)
-                    page.wait_for_timeout(3000)
-                    _note(f"[経営管理] 『{opener}』を開いた → {C.safe_url(page.url)}")
-                    break
-            else:
-                continue
-            break
+                    return True
         except Exception:
             continue
+    return False
+
+
+# run #22 で経営管理タブの中身が判明した。
+#   ダッシュボード → /bi/flDashboard      売上予測 → /bi/sales-forecast
+#   日報          → /bi/dailySalesReport  カスタムレポート → /bi/customReports
+#   仕入れ登録 / 小口現金登録 / 収入支出登録 / 目標設定 / 科目・取引先登録 / 伝票指示(β)
+# 「PL」「POSデータ分析」「取引登録」は**見出しだけでリンクが無い**＝折りたたまれている。
+# サポートの言う CSVダウンロード はこの中にあるとみて、開いて差分を見る。
+# 「カスタムレポート」は見出しではなく実リンク。押すと画面が変わって
+# 開いたメニューごと消えるので入れない。見出し＝hrefを持たない要素だけを押す。
+GROUPS = ("POSデータ分析", "PL", "取引登録")
+
+
+def _find_cost_export(page):
+    """経営管理の画面から「CSVダウンロード」へ辿る。
+    URLを当てずに、折りたたまれた見出しを開きながら画面から探す
+    （当て推量のURLはSPAを壊すことがある。新Uレジでセッションごと落とした）。"""
+    known = _links_with_text(page)
+    _note(f"[経営管理] 画面内のリンク {len(known)}件（文字→href、[隠]は非表示）:")
+    for t in known[:40]:
+        _note(f"      - {t}")
+    seen = set(known)
+
+    # 折りたたまれた見出しを1つずつ開き、増えたリンクだけを出す。
+    # 全部出すと毎回同じ一覧で埋まって、何が増えたのか分からなくなる。
+    for group in GROUPS:
+        if not _click_group(page, group):
+            _note(f"[経営管理] 見出し『{group}』は押せなかった")
+            continue
+        page.wait_for_timeout(2500)
+        now = _links_with_text(page)
+        fresh = [t for t in now if t not in seen]
+        seen |= set(now)
+        if fresh:
+            _note(f"[経営管理] 『{group}』を開いて増えたリンク {len(fresh)}件:")
+            for t in fresh[:25]:
+                _note(f"      - {t}")
+        else:
+            _note(f"[経営管理] 『{group}』を開いたがリンクは増えなかった")
+
+    # 「CSV」を含むリンクが出ていれば、それが入口。
+    csv_links = [t for t in seen if "CSV" in t or "ダウンロード" in t]
+    if csv_links:
+        _note(f"[経営管理] CSVらしきリンク {len(csv_links)}件: {' / '.join(csv_links[:10])}")
 
     for name in ("CSVダウンロード", "CSV出力", "ダウンロード", "CSV"):
-        try:
-            loc = page.get_by_text(name, exact=True)
-            hit = None
-            for i in range(min(loc.count(), 5)):
-                if loc.nth(i).is_visible():
-                    hit = loc.nth(i)
-                    break
-            if hit is None:
-                continue
-            before = page.url
-            hit.click(timeout=5000)
-            page.wait_for_timeout(5000)
-            _note(f"[経営管理] 『{name}』を押した → {C.safe_url(page.url)}"
-                  f"{'（画面は変わらず）' if page.url == before else ''}")
-            C.diag_dump(page, "dinii_12_fl_export")
-            _collect_checkbox_labels(page)
-            _collect_cost_context(page, "経営管理のCSVダウンロード")
-            return True
-        except Exception as e:
-            _note(f"[経営管理] 『{name}』の操作に失敗: {type(e).__name__}")
+        if any(ng in name for ng in ("登録", "取込", "アップロード", "一括")):
+            continue   # 書き込み系には触らない
+        if not _click_label(page, name):
+            continue
+        page.wait_for_timeout(5000)
+        _note(f"[経営管理] 『{name}』を押した → {C.safe_url(page.url)}")
+        C.diag_dump(page, "dinii_12_fl_export")
+        _collect_checkbox_labels(page)
+        _collect_cost_context(page, "経営管理のCSVダウンロード")
+        return True
     _note("[経営管理] CSVダウンロードへの導線が画面から見つからなかった")
     return False
 
