@@ -355,11 +355,9 @@ def _select_pl_period(page, ym: str) -> bool:
         return False
     if not found.get("ok"):
         _note(f"[PL期間] {found.get('why')}")
-        # 期間は input ではなく div 側に出ている（実測: 唯一の input は空で
-        # readonly でもなく、画面の 2026年09月20日-2026年09月20日 は別の要素）。
-        # ピッカーを開いて中身を出す。ここで諦めると次も同じところで止まる。
-        _open_period_picker(page)
-        return False
+        # 期間は input に入っていない（実測: 唯一の input は空で readonly でもない。
+        # v-field の中身は「今日」というプリセット名）。メニューから選ぶ。
+        return _try_pl_period_by_menu(page, ym)
     if found.get("readonly"):
         # 読み取り専用ならピッカーを開かないと変えられない。ここで黙って
         # 先に進むと当月のCSVを「対象月のもの」として取り込んでしまう。
@@ -373,9 +371,10 @@ def _select_pl_period(page, ym: str) -> bool:
     # ---- 確認: 画面がほんとうに対象月になったか ----
     if _period_matches(page, ym):
         return True
+    # ③ 期間メニュー（実測ではここが本命。プリセットの一覧が出る）
+    if _try_pl_period_by_menu(page, ym):
+        return True
     _note("[PL期間] このまま落とすと当月のCSVを対象月として取り込むので、中止する")
-    # ③ どちらも駄目ならピッカーを開いて中身を出す（次の実装のため）
-    _open_period_picker(page)
     return False
 
 
@@ -401,17 +400,23 @@ def _overlay_sig(page) -> list:
         return []
 
 
-def _open_period_picker(page) -> bool:
-    """期間のピッカーを開いて中身を棚卸しする。
+# 期間メニューの項目（実測）。カレンダーではなくプリセットの一覧だった。
+#   今日 / 昨日 / 過去7日間 / 過去30日間 / 今月 / 先月 / 期間を指定
+# 既定は「今日」。だからCSVが1行しか落ちなかった。
+PERIOD_PRESETS = ("今日", "昨日", "過去7日間", "過去30日間", "今月", "先月", "期間を指定")
 
-    前回は「年月日を含むいちばん内側の要素」から祖先を辿ったが、5段では
-    `v-field` に届かず `div.v-row`（行全体）を押していた。押しても何も開かず、
-    元から在った左メニューを「開いた」と誤報した。
 
-    この画面の `v-field` は1つだけなので、**それを直に押す**。Vuetify は
-    追加アイコン（`v-field__append-inner`）側が入口のこともあるので、
-    そちらから順に試し、**押す前後でオーバーレイの差を取って**本当に開いたか
-    を判定する。"""
+def _open_period_menu(page) -> bool:
+    """期間のメニューを開く。開けたかを返す。
+
+    `v-field` はこの画面に1つだけ。入口は**追加アイコン**
+    （`v-field__append-inner`）で、本体を押しても開かないことがあるので
+    アイコン→本体の順に試す。
+
+    **開いたかどうかは、押す前後のオーバーレイの差で判定する。** この画面は
+    元から `v-list` / `v-overlay` を持っている（左メニュー、全店舗/グループ/
+    1店舗 の切替）ので、数えるだけだと押す前から在るものを「開いた」と誤る。
+    一度それで「開いたもの 7件」と誤報した。"""
     try:
         info = page.evaluate(
             r"""() => {
@@ -426,8 +431,7 @@ def _open_period_picker(page) -> bool:
                 if (app) targets.push(app);
                 targets.push(f);
                 targets.forEach((el, i) => el.setAttribute('data-claude-period', String(i + 1)));
-                return { ok: true, n: targets.length, text: cut(f.innerText),
-                         cls: cut(f.className) };
+                return { ok: true, n: targets.length, text: cut(f.innerText) };
             }""")
     except Exception as e:
         _note(f"[PL期間] v-field を探せなかった: {type(e).__name__}: {e}")
@@ -435,11 +439,9 @@ def _open_period_picker(page) -> bool:
     if not info.get("ok"):
         _note(f"[PL期間] {info.get('why')}")
         return False
-    _note(f"[PL期間] v-field: {info['cls']}")
-    _note(f"[PL期間] v-field の中身: {info['text']}")
+    _note(f"[PL期間] いまの期間の表示: {info['text']}")
 
     before = _overlay_sig(page)
-    _note(f"[PL期間] 押す前から見えているオーバーレイ {len(before)}件")
     for i in range(1, info["n"] + 1):
         what = "追加アイコン" if (i == 1 and info["n"] > 1) else "v-field 本体"
         try:
@@ -447,18 +449,87 @@ def _open_period_picker(page) -> bool:
         except Exception as e:
             _note(f"[PL期間] {what}を押せなかった: {type(e).__name__}")
             continue
-        page.wait_for_timeout(2500)
-        after = _overlay_sig(page)
-        fresh = [a for a in after if a not in before]
-        if not fresh:
-            _note(f"[PL期間] {what}を押したが、新しく開いたものは無い")
-            continue
-        _note(f"[PL期間] {what}で開いた: {len(fresh)}件")
-        for a in fresh[:6]:
-            _note(f"      - {a}")
-        _dump_open_picker(page)
+        page.wait_for_timeout(2000)
+        fresh = [a for a in _overlay_sig(page) if a not in before]
+        if fresh:
+            _note(f"[PL期間] {what}でメニューが開いた")
+            return True
+        _note(f"[PL期間] {what}を押したが、新しく開いたものは無い")
+    _note("[PL期間] メニューが開かなかった")
+    return False
+
+
+def _click_menu_item(page, label: str) -> bool:
+    """開いているメニューの項目を押す。**文字の完全一致で選ぶ。**
+
+    部分一致にすると「今月」と「先月」、「今日」と「昨日」のような
+    紛らわしい組を取り違える。取り違えても画面は普通に動くので、
+    **間違った月のCSVが「対象月のもの」として落ちる**のがいちばん怖い。"""
+    try:
+        ok = page.evaluate(
+            r"""([sel, label]) => {
+                document.querySelectorAll('[data-claude-menuitem]')
+                    .forEach(e => e.removeAttribute('data-claude-menuitem'));
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                for (const o of [...document.querySelectorAll(sel)].filter(vis)) {
+                    const leaf = [...o.querySelectorAll('*')].find(
+                        el => el.children.length === 0
+                              && (el.textContent || '').trim() === label);
+                    if (!leaf) continue;
+                    // 押せる器（v-list-item / button）まで上がる。見つからなければ
+                    // 葉そのものを押す。**見つからないまま上がり続けない**
+                    // （前に5段上がって行全体を押し、何も起きなかった）。
+                    let t = leaf, found = null;
+                    for (let i = 0; i < 4 && t; i++, t = t.parentElement) {
+                        if (/v-list-item|v-btn/.test(String(t.className || ''))
+                            || t.tagName === 'BUTTON') { found = t; break; }
+                    }
+                    (found || leaf).setAttribute('data-claude-menuitem', '1');
+                    return true;
+                }
+                return false;
+            }""", [_OVERLAY_SEL, label])
+    except Exception as e:
+        _note(f"[PL期間] 『{label}』を探せなかった: {type(e).__name__}: {e}")
+        return False
+    if not ok:
+        _note(f"[PL期間] メニューに『{label}』が無い")
+        return False
+    try:
+        page.locator("[data-claude-menuitem='1']").first.click(timeout=5000)
+    except Exception as e:
+        _note(f"[PL期間] 『{label}』を押せなかった: {type(e).__name__}")
+        return False
+    page.wait_for_timeout(3000)
+    _note(f"[PL期間] 『{label}』を押した")
+    return True
+
+
+def _try_pl_period_by_menu(page, ym: str) -> bool:
+    """期間メニューから対象月を選ぶ。
+
+    実測でメニューはカレンダーではなく**プリセットの一覧**だった。
+    毎月の定期取得は先月ぶんなので、**「先月」で足りる**。
+    それ以外の月（過去分の埋め戻し）は「期間を指定」が要る。
+
+    「先月」が対象月に当たるかは**画面を読んで確かめる**。実行している
+    ランナーはUTC、画面はJSTなので、月初の数時間は両者の「先月」が
+    ずれる。時計で決め打ちにせず、押してから確認する。"""
+    if not _open_period_menu(page):
+        return False
+    if _click_menu_item(page, "先月") and _period_matches(page, ym):
         return True
-    _note("[PL期間] どれを押しても何も開かなかった。別の入口があるはず")
+    _note("[PL期間] 「先月」では対象月にならない。「期間を指定」を見る")
+    # メニューは項目を押すと閉じるので開き直す
+    if not _open_period_menu(page):
+        return False
+    if not _click_menu_item(page, "期間を指定"):
+        return False
+    _dump_open_picker(page)
+    if _period_matches(page, ym):
+        return True
+    _note("[PL期間] 「期間を指定」の先はまだ実装していない（上の棚卸しを見て書く）")
     return False
 
 
