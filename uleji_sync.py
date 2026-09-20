@@ -35,10 +35,15 @@ def _base() -> str:
 #   /cms/side-menu/past-sales-regist → ログイン画面に戻された（セッションが切れた）
 # side-menu配下は画面遷移の途中状態を前提にしているらしく、goto だと壊れる。
 # 人と同じようにメニューを「クリック」して開く。
+# run #14: 伝票明細は開けた（/cms/slip-list/init?requestTransType=1）。
+# 過去売上実績は「押せなかった」＝親メニューをもう一度押して畳んでしまい、
+# 子が隠れたため。既に見えている子は親を押さない。
+# 分析はクリックしても画面が変わらなかった。別タブで開いている疑いがあるので
+# 最後に回し、新しいタブが開いたらそちらを見る。
 MENU = [
-    (None, "分析", "uleji_10_analysis"),
     ("売上管理", "伝票明細", "uleji_11_slip"),
     ("売上管理", "過去売上実績", "uleji_12_past_sales"),
+    (None, "分析", "uleji_10_analysis"),
 ]
 
 KEYWORDS = ("原価", "売上", "客数", "来客", "食材", "粗利", "仕入",
@@ -115,28 +120,68 @@ def _click_text(page, text: str) -> bool:
     return False
 
 
+def _visible(page, text: str) -> bool:
+    try:
+        loc = page.get_by_text(text, exact=True)
+        return any(loc.nth(i).is_visible() for i in range(min(loc.count(), 3)))
+    except Exception:
+        return False
+
+
+def _click_maybe_popup(page, text: str, wait_ms: int = 5000):
+    """押したあと、新しいタブが開いたらそのタブを返す。開かなければ元のページ。
+    押せなければ None。別タブで開く画面を「何も起きなかった」と誤判定しないため。"""
+    ctx = page.context
+    before = list(ctx.pages)
+    if not _click_text(page, text):
+        return None
+    page.wait_for_timeout(wait_ms)
+    fresh = [p for p in ctx.pages if p not in before]
+    if fresh:
+        try:
+            fresh[0].wait_for_load_state("domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        return fresh[0]
+    return page
+
+
 def _explore_menu(page, parent: str | None, child: str, tag: str):
     """メニューをクリックして画面を開き、中身をまとめメモに残す。"""
     if _on_login_page(page):
         _note(f"[{child}] ログイン画面に戻されているため調査できず")
         return
     try:
-        if parent and not _click_text(page, parent):
-            _note(f"[{child}] 親メニュー『{parent}』が押せなかった")
-            return
-        if parent:
-            page.wait_for_timeout(1000)
-        if not _click_text(page, child):
+        # 既に子が見えているなら親は押さない。押すと畳まれて子が隠れる
+        # （ダイニーの「全選択」で同じ失敗をした）。
+        if parent and not _visible(page, child):
+            if not _click_text(page, parent):
+                _note(f"[{child}] 親メニュー『{parent}』が押せなかった")
+                return
+            page.wait_for_timeout(1200)
+        target = _click_maybe_popup(page, child)
+        if target is None:
             _note(f"[{child}] メニューが押せなかった")
             return
-        page.wait_for_timeout(5000)
-        C.diag_dump(page, tag)
-        _screen_report(page, child)
+        if target is not page:
+            _note(f"[{child}] 別タブで開いた")
+        C.diag_dump(target, tag)
+        _screen_report(target, child)
         for word in ("CSV", "ダウンロード", "出力"):
-            C.probe_elements(page, word, limit=3)
-        C.probe_icon_buttons(page)
-        if _on_login_page(page):
+            C.probe_elements(target, word, limit=3)
+        C.probe_icon_buttons(target)
+        if _on_login_page(target):
             _note(f"[{child}] この画面を開いた直後にログイン画面へ戻された")
+            return
+        # 検索して初めてCSV出力が現れる画面があるので、あれば押して見直す。
+        # 読むだけの操作なので副作用は無い。
+        if _click_text(target, "検索") or _click_text(target, "検 索"):
+            target.wait_for_timeout(6000)
+            _note(f"[{child}] 検索を押した後:")
+            _screen_report(target, child + "(検索後)")
+            C.diag_dump(target, tag + "_searched")
+        if target is not page:
+            target.close()
     except Exception as e:
         _note(f"[{child}] 調査に失敗: {e}")
 
