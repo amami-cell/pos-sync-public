@@ -353,8 +353,13 @@ def probe_form_state(page):
 #   OTP_IMAP_PASS  … アプリパスワード等（通常のログインパスワードではないことが多い）
 #   OTP_IMAP_PORT   (任意, 既定 993)
 #   OTP_IMAP_FOLDER (任意, 既定 INBOX)
-#   OTP_SUBJECT_HINT(任意, 既定 認証コード) … 件名/本文の絞り込み語
-#   OTP_CODE_REGEX  (任意, 既定 6桁の数字)
+#   OTP_SUBJECT_HINT(任意) … 件名/本文の絞り込み語
+#   OTP_FROM_HINT   (任意) … 差出人の絞り込み語（ドメインで十分）
+#   OTP_CODE_REGEX  (任意) … コードの取り出し方
+# 既定値は呼び出し側（uleji_sync.py 等）が渡す。Secretsに入れた値が優先。
+#
+# 差出人で絞るのは必須に近い。個人のメールボックスには他サービスの
+# 「認証コード」メールも届くので、件名の語だけだと別のコードを拾う。
 #
 # コード自体はログに出さない。桁数だけ出す。
 OTP_DEFAULT_REGEX = r"(?<!\d)(\d{6})(?!\d)"
@@ -390,18 +395,26 @@ def _mail_text(msg) -> str:
     return "\n".join(parts)
 
 
-def fetch_otp_via_imap(not_before, timeout_sec: int = 180, poll_sec: int = 10) -> str:
+def fetch_otp_via_imap(not_before, timeout_sec: int = 180, poll_sec: int = 10,
+                       subject_hint: str = "認証コード", from_hint: str = "",
+                       code_regex: str = "") -> str:
     """not_before 以降に届いたメールから認証コードを取り出す。
     not_before より前のメールは無視する（前回ログインの古いコードを拾わないため）。
-    見つかるまで poll_sec 間隔で最大 timeout_sec 待つ（メールは即着しないため）。"""
+    見つかるまで poll_sec 間隔で最大 timeout_sec 待つ（メールは即着しないため）。
+    subject_hint / from_hint / code_regex は呼び出し側が渡す既定値で、
+    同名のSecretsが設定されていればそちらが優先される。"""
     import imaplib, email, re, time
     from email.utils import parsedate_to_datetime
 
     host = env("OTP_IMAP_HOST"); user = env("OTP_IMAP_USER"); pw = env("OTP_IMAP_PASS")
     port = int(env("OTP_IMAP_PORT") or 993)
     folder = env("OTP_IMAP_FOLDER") or "INBOX"
-    hint = env("OTP_SUBJECT_HINT") or "認証コード"
-    pattern = re.compile(env("OTP_CODE_REGEX") or OTP_DEFAULT_REGEX)
+    hint = env("OTP_SUBJECT_HINT") or subject_hint
+    sender = (env("OTP_FROM_HINT") or from_hint).lower()
+    # ラベル付きの正規表現を先に試し、外れたら汎用の6桁にする。
+    # 「認証コードの有効期限は15分」のような本文の他の数字を拾わないため。
+    patterns = [re.compile(p) for p in
+                [env("OTP_CODE_REGEX"), code_regex, OTP_DEFAULT_REGEX] if p]
     if not (host and user and pw):
         raise RuntimeError(
             "OTP_IMAP_HOST / OTP_IMAP_USER / OTP_IMAP_PASS が未設定です。"
@@ -437,12 +450,20 @@ def fetch_otp_via_imap(not_before, timeout_sec: int = 180, poll_sec: int = 10) -
                         continue
                     if sent.timestamp() < not_before.timestamp() - 120:
                         continue  # ログイン試行より前のメールは古いコード
+                    frm = str(email.header.make_header(
+                        email.header.decode_header(msg.get("From") or "")))
+                    if sender and sender not in frm.lower():
+                        continue  # 他サービスの認証コードメールを拾わない
                     subject = str(email.header.make_header(
                         email.header.decode_header(msg.get("Subject") or "")))
                     body = _mail_text(msg)
                     if hint and hint not in subject and hint not in body:
                         continue
-                    m = pattern.search(subject) or pattern.search(body)
+                    m = None
+                    for pat in patterns:
+                        m = pat.search(subject) or pat.search(body)
+                        if m:
+                            break
                     if m:
                         code = m.group(1)
                         print(f"[otp] 認証コードを取得（{len(code)}桁、{attempt}回目の確認、"
@@ -453,8 +474,10 @@ def fetch_otp_via_imap(not_before, timeout_sec: int = 180, poll_sec: int = 10) -
 
         if time.time() >= deadline:
             raise RuntimeError(
-                f"[otp] {timeout_sec}秒待っても『{hint}』を含む新着メールが見つかりませんでした。"
-                "転送設定・フォルダ名(OTP_IMAP_FOLDER)・絞り込み語(OTP_SUBJECT_HINT)を確認してください"
+                f"[otp] {timeout_sec}秒待っても、差出人『{sender or '(指定なし)'}』で"
+                f"『{hint}』を含む新着メールが見つかりませんでした。"
+                "転送設定・フォルダ名(OTP_IMAP_FOLDER)・絞り込み語"
+                "(OTP_SUBJECT_HINT / OTP_FROM_HINT)を確認してください"
             )
         print(f"[otp] 未着。{poll_sec}秒後に再確認します")
         time.sleep(poll_sec)

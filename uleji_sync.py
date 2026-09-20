@@ -33,7 +33,18 @@ def _submit_otp(page) -> bool:
     except Exception as e:
         print(f"[uleji] 再送ボタンの操作に失敗（届いている前提で続行）: {e}")
 
-    code = C.fetch_otp_via_imap(sent_at)
+    # 実物のメールで確定した特徴。Secretsで上書きもできる。
+    #   差出人  no-reply@pos.usen-regi.com
+    #   件名    【USENレジ】認証コードのお知らせ
+    #   本文    認証コード：123456   （有効期限15分）
+    # 差出人で絞るのが要。個人のメールボックスには他サービスの
+    # 「認証コード」メールも届くので、件名の語だけでは別のコードを拾う。
+    code = C.fetch_otp_via_imap(
+        sent_at,
+        subject_hint="認証コード",
+        from_hint="usen-regi.com",
+        code_regex=r"認証コード[：:]\s*(\d{6})",
+    )
     page.locator("#authenticationCode").fill(code)
     page.get_by_role("button", name="認証", exact=True).click()
     try:
