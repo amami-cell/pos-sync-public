@@ -421,7 +421,11 @@ def fetch_otp_via_imap(not_before, timeout_sec: int = 180, poll_sec: int = 10) -
                 typ, data = M.search(None, f'(SINCE "{since}")')
                 ids = data[0].split() if typ == "OK" and data and data[0] else []
                 for num in reversed(ids):  # 新しいものから
-                    typ, raw = M.fetch(num, "(RFC822)")
+                    # BODY.PEEK[] は既読フラグを立てない。select(readonly=True) の
+                    # 時点でサーバーは flag を変えない決まりだが、本人の受信箱を
+                    # 読ませる可能性があるので二重に安全側へ倒す。
+                    # このコードはメールを読むだけで、削除も移動も一切しない。
+                    typ, raw = M.fetch(num, "(BODY.PEEK[])")
                     if typ != "OK" or not raw or not raw[0]:
                         continue
                     msg = email.message_from_bytes(raw[0][1])
