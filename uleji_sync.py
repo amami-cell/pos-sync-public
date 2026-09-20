@@ -404,7 +404,97 @@ def detect_otp(page) -> str | None:
     return None
 
 
-def fetch_csv(ym: str) -> bytes:
+# 過去売上実績の画面（run #17 で確定）
+#   select designatedYear  … 年
+#   select designatedMonth … 月
+#   select storeCode       … 店舗
+#   input  pastSalesInfoList[N].sales / .guests … **入力用のグリッド**。触らない
+#   ボタン 検索 / CSVダウンロード / 登録 / CSV一括設定
+# 落ちるCSV: UTF-8(BOM) / 列は 店舗コード | 日付 | 売上 | 客数 / 日別31行
+YEAR_SELECT = "#designatedYear"
+MONTH_SELECT = "#designatedMonth"
+STORE_SELECT = "#storeCode"
+
+
+def _store_options(page) -> dict:
+    """店舗セレクトの選択肢（コード→表示名）。CSVには店舗コードしか入らないので、
+    店舗名に直すためにここで対応表を作る。"""
+    try:
+        opts = page.evaluate(
+            r"""(sel) => {
+                const el = document.querySelector(sel);
+                if (!el) return [];
+                return [...el.options].map(o => [o.value, (o.text || '').trim()]);
+            }""", STORE_SELECT)
+        return {v: t for v, t in opts if v}
+    except Exception:
+        return {}
+
+
+def _select_month(page, ym: str) -> bool:
+    """年月セレクトを対象月に合わせる。合わせられたかを返す。"""
+    year, month = ym.split("-")
+    ok = True
+    for sel, want in ((YEAR_SELECT, year), (MONTH_SELECT, month)):
+        done = False
+        for value in (want, want.lstrip("0"), f"{int(want)}"):
+            try:
+                page.select_option(sel, value=value, timeout=4000)
+                done = True
+                break
+            except Exception:
+                continue
+        if not done:   # value で無理ならラベル（「2026年」「8月」等）で試す
+            for label in (want, want.lstrip("0"), f"{int(want)}年", f"{int(want)}月"):
+                try:
+                    page.select_option(sel, label=label, timeout=4000)
+                    done = True
+                    break
+                except Exception:
+                    continue
+        if not done:
+            print(f"[uleji] {sel} を {want} に合わせられませんでした")
+            ok = False
+    return ok
+
+
+def _open_past_sales(page):
+    """売上管理 → 過去売上実績 を開く。URL直打ちはセッションを壊すのでクリックで。"""
+    if not _visible(page, "過去売上実績"):
+        if not _click_text(page, "売上管理"):
+            raise RuntimeError("[uleji] メニュー『売上管理』を開けませんでした")
+        page.wait_for_timeout(1200)
+    if not _click_text(page, "過去売上実績"):
+        raise RuntimeError("[uleji] メニュー『過去売上実績』を開けませんでした")
+    page.wait_for_timeout(5000)
+    if _on_login_page(page):
+        raise RuntimeError("[uleji] 過去売上実績を開いたらログイン画面に戻されました")
+
+
+def _download_month(page, ym: str, already_open: bool = False) -> bytes:
+    """対象月を指定して検索し、CSVを落とす。書き込み系のボタンには触らない。"""
+    if not already_open:
+        _open_past_sales(page)
+    codes = _store_options(page)
+    if codes:
+        print(f"[uleji] 店舗セレクトの選択肢 {len(codes)}件:")
+        for code, name in list(codes.items())[:20]:
+            print(f"    | {code}\t{name}")
+    if not _select_month(page, ym):
+        raise RuntimeError(f"[uleji] 対象月 {ym} を指定できませんでした")
+    if not (_click_text(page, "検索") or _click_text(page, "検 索")):
+        raise RuntimeError("[uleji] 検索ボタンを押せませんでした")
+    page.wait_for_timeout(6000)
+    with page.expect_download(timeout=120000) as dl:
+        page.get_by_text("CSVダウンロード", exact=True).first.click(timeout=8000)
+    data = open(dl.value.path(), "rb").read()
+    print(f"[uleji] {ym} のCSVを取得: {C.sniff_bytes(data)}")
+    return data
+
+
+def fetch_csv(ym: str) -> tuple[bytes, dict]:
+    """CSVと、店舗コード→店舗名の対応表を返す。CSVには店舗コードしか
+    入っていないので、店舗名は画面のセレクトから取る。"""
     company = C.env("ULEJI_COMPANY"); user = C.env("ULEJI_USER"); pw = C.env("ULEJI_PASS")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -437,38 +527,91 @@ def fetch_csv(ym: str) -> bytes:
             for line in FINDINGS:
                 print(f"  {line}")
             browser.close()
-            return b""
+            return b"", {}
 
         if otp:
             _submit_otp(page)
 
-        # ---- 実取得: 売上/原価CSVのエクスポート（TODO: 診断出力で確定）----
-        with page.expect_download() as dl_info:
-            page.click("text=CSV")  # TODO: エクスポートボタンの実セレクタ
-        data = open(dl_info.value.path(), "rb").read()
-        browser.close()
-        return data
+        # ---- 実取得: 過去売上実績 → 対象月を指定 → CSVダウンロード ----
+        try:
+            _open_past_sales(page)
+            names = _store_options(page)
+            data = _download_month(page, ym, already_open=True)
+        finally:
+            browser.close()
+        return data, names
 
 
-def normalize(rows: list[dict], ym: str) -> list[dict]:
-    """新UレジCSVの列名 -> 共通スキーマ。TODO: 実CSVのヘッダに合わせてキーを対応付け。"""
-    idx = C.build_store_index(C.load_stores())
-    out = []
-    unresolved = []
+def _num(v) -> float | None:
+    """CSVの数値。空欄・ハイフンは「値なし」として None を返す。
+    0として足すと、入力されていない日が売上0として混ざる。"""
+    if v is None:
+        return None
+    t = str(v).strip().replace(",", "").replace("￥", "").replace("¥", "")
+    if t in ("", "-", "--", "—"):
+        return None
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def normalize(rows: list[dict], ym: str, store_names: dict | None = None) -> list[dict]:
+    """新Uレジの日別CSV（店舗コード/日付/売上/客数）を月次にまとめる。
+    店舗コードはUSEN側の体系なので、店舗セレクトの対応表で店舗名に直し、
+    店舗名から店舗マスタ（FWの店舗コード）を引く。"""
+    stores = C.load_stores()
+    idx = C.build_store_index(stores)
+    names = store_names or {}
+    # 新Uレジ側の表示名は「大衆酒場 ぎふや」のように店舗を特定できない
+    # ことがある（マスタには ぎふや天満橋 と ぎふや福岡天神 の2店がある）。
+    # 名前で引けないときの逃げ道として、マスタで pos が uleji の店を見ておく。
+    uleji_master = [st for st in stores
+                    if (st.get("pos") or "fw") == "uleji" and st.get("active", True)]
+    agg: dict[str, dict] = {}
     for r in rows:
-        name = r.get("店舗名") or r.get("店舗") or r.get("shop_name")          # TODO
-        uri  = r.get("売上") or r.get("純売上") or r.get("sales")               # TODO
-        f    = r.get("原価_フード") or r.get("food_cost") or ""                 # TODO(無ければ空)
-        d    = r.get("原価_ドリンク") or r.get("drink_cost") or ""              # TODO
-        kyaku= r.get("客数") or r.get("来店客数") or r.get("guests") or ""       # TODO
-        if not name:
+        pos_code = str(r.get("店舗コード") or "").strip()
+        if not pos_code:
             continue
+        sales = _num(r.get("売上"))
+        guests = _num(r.get("客数"))
+        a = agg.setdefault(pos_code, {"売上": 0.0, "客数": 0.0, "日数": 0,
+                                      "売上あり": 0, "客数あり": 0})
+        if sales is not None:
+            a["売上"] += sales
+            a["売上あり"] += 1
+        if guests is not None:
+            a["客数"] += guests
+            a["客数あり"] += 1
+        a["日数"] += 1
+
+    out, unresolved = [], []
+    for pos_code, a in agg.items():
+        name = names.get(pos_code) or pos_code
         code = C.resolve_store_code(name, idx)
+        extra = ""
+        if not code and len(agg) == 1 and len(uleji_master) == 1:
+            # CSVに店舗が1つ、マスタで新Uレジの店も1つ。取り違えようがないので結ぶ。
+            # どちらかが複数になった時点でこの推定は効かなくなり、空のまま報告される。
+            code = uleji_master[0].get("store_code", "")
+            name = uleji_master[0].get("store_name", name)
+            extra = "／マスタで新Uレジの店が1件のため対応付け"
         if not code and name not in unresolved:
             unresolved.append(name)
+        # 何日ぶん足したのかを残す。月の途中までしか入っていないのに
+        # 満額の月次として扱うと、前年比や達成率が静かに狂う。
+        note = (f"新Uレジ 日別{a['日数']}日分を合算"
+                f"（売上入力{a['売上あり']}日）{extra}")
         out.append({
-            "年月": ym, "店舗名": name, "売上": uri, "フード原価": f,
-            "ドリンク原価": d, "客数": kyaku, "備考": "", "取込日時": C.now_str(), "POS": "uleji",
+            "年月": ym,
+            "店舗名": name,
+            "売上": int(a["売上"]) if a["売上あり"] else "",
+            "フード原価": "",      # 新Uレジの過去売上実績CSVに原価の列は無い
+            "ドリンク原価": "",
+            "客数": int(a["客数"]) if a["客数あり"] else "",
+            "備考": note,
+            "取込日時": C.now_str(),
+            "POS": "uleji",
             "店舗コード": code,
         })
     if unresolved:
@@ -480,10 +623,10 @@ def normalize(rows: list[dict], ym: str) -> list[dict]:
 
 def main():
     ym = C.last_month(sys.argv[1] if len(sys.argv) > 1 else None)
-    data = fetch_csv(ym)
+    data, store_names = fetch_csv(ym)
     if not data:  # 診断モードは空で返る
         return
-    rows = normalize(C.parse_csv_bytes(data), ym)
+    rows = normalize(C.parse_csv_bytes(data), ym, store_names)
     print(f"[uleji] {ym}: {len(rows)}店取得")
     sid = C.env("TARGET_SHEET_ID")
     if sid:
