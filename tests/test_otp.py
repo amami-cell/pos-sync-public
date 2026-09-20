@@ -57,6 +57,11 @@ ok &= run("USENのメールだけ", [mail(*USEN, now)], now, "123456")
 ok &= run("他サービスの認証コードは拾わない", [mail(*GOOGLE, now)], now, None)
 ok &= run("両方あってもUSENを選ぶ", [mail(*GOOGLE, now), mail(*USEN, now)], now, "123456")
 ok &= run("古いメールは無視", [mail(*USEN, old)], now, None)
+FORWARDED = ("ガルーン <amami@example.co.jp>", "Fwd: 【USENレジ】認証コードのお知らせ",
+             "---------- 転送メッセージ ----------\n"
+             "From: USENレジ <no-reply@pos.usen-regi.com>\n\n"
+             "認証コード：123456\n")
+ok &= run("転送で差出人が書き換わっても拾う", [mail(*FORWARDED, now)], now, "123456")
 ok &= run("差出人が違えば件名が同じでも無視",
           [mail("偽 <a@example.com>", USEN[1], USEN[2], now)], now, None)
 print("---", "全部通りました" if ok else "失敗あり")

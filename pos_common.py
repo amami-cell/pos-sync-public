@@ -452,8 +452,19 @@ def fetch_otp_via_imap(not_before, timeout_sec: int = 180, poll_sec: int = 10,
                         continue  # ログイン試行より前のメールは古いコード
                     frm = str(email.header.make_header(
                         email.header.decode_header(msg.get("From") or "")))
+                    # 転送されてくると From が転送元（ガルーン等）に書き換わることが
+                    # あるので、From で当たらなければ他のヘッダと本文も見る。
+                    # usen-regi.com のような固有のドメインが他社のメールに
+                    # 紛れ込むことはまず無いので、絞り込みとしては十分きつい。
                     if sender and sender not in frm.lower():
-                        continue  # 他サービスの認証コードメールを拾わない
+                        hay = " ".join(filter(None, [
+                            msg.get("Return-Path"), msg.get("Sender"),
+                            msg.get("Reply-To"), msg.get("X-Forwarded-For"),
+                            _mail_text(msg),
+                        ])).lower()
+                        if sender not in hay:
+                            continue  # 他サービスの認証コードメールを拾わない
+                        print("[otp] 転送されたメールとして扱います（差出人が書き換わっている）")
                     subject = str(email.header.make_header(
                         email.header.decode_header(msg.get("Subject") or "")))
                     body = _mail_text(msg)
