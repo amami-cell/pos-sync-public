@@ -72,7 +72,7 @@ def _frame_texts(page) -> list[tuple[str, str]]:
 
 def _screen_report(page, label: str):
     """画面の中身をまとめメモに残す。数字は伏せる（公開リポジトリのため）。"""
-    _note(f"[{label}] URL {page.url}")
+    _note(f"[{label}] URL {C.safe_url(page.url)}")
     texts = _frame_texts(page)
     if len(texts) > 1:
         _note(f"[{label}] フレーム {len(texts)}個（中身は別フレームにある）")
@@ -252,7 +252,7 @@ def _open_card(page, label: str, tag: str) -> bool:
             return False
         page.locator("[data-claude-target='1']").first.click(timeout=5000)
         page.wait_for_timeout(6000)
-        _note(f"[分析] 『{label}』の詳細を開いた → {page.url}")
+        _note(f"[分析] 『{label}』の詳細を開いた → {C.safe_url(page.url)}")
         C.diag_dump(page, f"{tag}_{label}")
         _screen_report(page, f"分析({label})")
         _cost_lines(page, f"分析({label})")
@@ -307,6 +307,20 @@ def _explore_analytics(page, tag: str):
             _try_csv(page, f"分析({name})", f"{tag}_{'detail' if '詳細' in name else 'table'}")
 
 
+def _wait_sso(page, label: str, timeout_ms: int = 25000):
+    """分析サイトはSSOの受け渡しページ(/sso-auth)を経由してから本画面に変わる。
+    転送を待たずに読むと中身が空で「原価が無い」と誤判定する。
+    ※このURLのクエリには認証トークンが載る。ログにはパスだけ出す。"""
+    import time
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        if "sso-auth" not in (page.url or ""):
+            return True
+        page.wait_for_timeout(1000)
+    _note(f"[{label}] SSOの転送が {timeout_ms // 1000}秒で終わらなかった")
+    return False
+
+
 def _explore_menu(page, parent: str | None, child: str, tag: str):
     """メニューをクリックして画面を開き、中身をまとめメモに残す。"""
     if _on_login_page(page):
@@ -326,6 +340,7 @@ def _explore_menu(page, parent: str | None, child: str, tag: str):
             return
         if target is not page:
             _note(f"[{child}] 別タブで開いた")
+        _wait_sso(target, child)
         C.diag_dump(target, tag)
         _screen_report(target, child)
         for word in ("CSV", "ダウンロード", "出力"):

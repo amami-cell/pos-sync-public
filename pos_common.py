@@ -179,7 +179,7 @@ def want_diag_files() -> bool:
 def diag_dump(page, tag: str, outdir: str = "diag"):
     import os as _os
     _os.makedirs(outdir, exist_ok=True)
-    print(f"[diag:{tag}] URL = {page.url}")
+    print(f"[diag:{tag}] URL = {safe_url(page.url)}")
     if want_diag_files():
         try:
             page.screenshot(path=f"{outdir}/{tag}.png", full_page=True)
@@ -348,6 +348,16 @@ def write_findings(tag: str, lines: list[str], outdir: str = "diag"):
     _os.makedirs(outdir, exist_ok=True)
     with open(f"{outdir}/FINDINGS_{tag}.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+
+
+def safe_url(url: str) -> str:
+    """URLからクエリ文字列を落とす。SSOの受け渡しURLには認証トークンが
+    載っていることがあり（例 /sso-auth?authorization=...）、公開リポジトリの
+    ジョブログに出すと外から読めてしまう。パスだけ分かれば調査には足りる。"""
+    if not url:
+        return url
+    head = url.split("?", 1)[0].split("#", 1)[0]
+    return head + ("?…(省略)" if len(head) < len(url) else "")
 
 
 def mask_numbers(text: str) -> str:

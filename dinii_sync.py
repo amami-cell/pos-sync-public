@@ -67,7 +67,7 @@ def _goto_export(page):
     page.goto(_base() + EXPORT_PATH, wait_until="domcontentloaded")
     page.wait_for_timeout(3000)
     if "export" not in page.url:
-        print(f"[dinii] URL直打ちで遷移できず（現在 {page.url}）。メニューから辿ります")
+        print(f"[dinii] URL直打ちで遷移できず（現在 {C.safe_url(page.url)}）。メニューから辿ります")
         page.get_by_text("データ出力・連携", exact=False).first.click()
         page.wait_for_timeout(2500)
 
@@ -384,7 +384,7 @@ def _find_cost_export(page):
                 if loc.nth(i).is_visible():
                     loc.nth(i).click(timeout=4000)
                     page.wait_for_timeout(3000)
-                    _note(f"[経営管理] 『{opener}』を開いた → {page.url}")
+                    _note(f"[経営管理] 『{opener}』を開いた → {C.safe_url(page.url)}")
                     break
             else:
                 continue
@@ -405,7 +405,7 @@ def _find_cost_export(page):
             before = page.url
             hit.click(timeout=5000)
             page.wait_for_timeout(5000)
-            _note(f"[経営管理] 『{name}』を押した → {page.url}"
+            _note(f"[経営管理] 『{name}』を押した → {C.safe_url(page.url)}"
                   f"{'（画面は変わらず）' if page.url == before else ''}")
             C.diag_dump(page, "dinii_12_fl_export")
             _collect_checkbox_labels(page)
@@ -423,7 +423,7 @@ def _explore(page, path: str, tag: str):
     try:
         page.goto(base + path, wait_until="domcontentloaded")
         page.wait_for_timeout(4000)
-        print(f"[dinii][探索] {path} → 実際のURL {page.url}")
+        print(f"[dinii][探索] {path} → 実際のURL {C.safe_url(page.url)}")
         C.diag_dump(page, tag)
         for word in ("ダウンロード", "CSV", "エクスポート", "出力"):
             C.probe_elements(page, word, limit=3)
