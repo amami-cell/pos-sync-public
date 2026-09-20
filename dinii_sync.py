@@ -363,6 +363,35 @@ def _find_cost_export(page):
     except Exception as e:
         _note(f"[経営管理] リンクの列挙に失敗: {e}")
 
+    # サポートの案内は「ダッシュボード ＞ 経営管理タブ ＞ CSVダウンロード」。
+    # 経営管理の配下に入らないと CSVダウンロード が現れない可能性が高いので、
+    # まずナビの項目名を全部出し、経営管理を開いてから探す。
+    try:
+        navs = page.evaluate(
+            r"""() => [...new Set([...document.querySelectorAll(
+                'a, button, [role=menuitem], [role=tab], li')]
+                .filter(e => e.offsetParent !== null)
+                .map(e => (e.getAttribute('aria-label') || e.getAttribute('title')
+                           || e.textContent || '').trim().replace(/\s+/g, ' '))
+                .filter(t => t && t.length <= 20))]""")
+        _note(f"[経営管理] 画面にある項目 {len(navs)}件: {_mask_numbers(' / '.join(navs[:40]))}")
+    except Exception as e:
+        _note(f"[経営管理] 項目の列挙に失敗: {e}")
+    for opener in ("経営管理", "分析", "レポート"):
+        try:
+            loc = page.get_by_text(opener, exact=True)
+            for i in range(min(loc.count(), 3)):
+                if loc.nth(i).is_visible():
+                    loc.nth(i).click(timeout=4000)
+                    page.wait_for_timeout(3000)
+                    _note(f"[経営管理] 『{opener}』を開いた → {page.url}")
+                    break
+            else:
+                continue
+            break
+        except Exception:
+            continue
+
     for name in ("CSVダウンロード", "CSV出力", "ダウンロード", "CSV"):
         try:
             loc = page.get_by_text(name, exact=True)
@@ -498,9 +527,11 @@ def fetch_csv(ym: str) -> bytes:
                 _explore(page, path, tag)
             # ログのtailは後続ステップで埋まりやすいので、要点をここで再掲する
             print("==== diniiまとめ（ここが結論） ====")
-            print(f"  日計CSV: {'取得できた（原価の列は無し。売上と客数のみ）' if data else '取得できず'}")
+            head = f"日計CSV: {'取得できた（原価の列は無し。売上と客数のみ）' if data else '取得できず'}"
+            print("  " + head)
             for line in FINDINGS:
                 print("  " + line)
+            C.write_findings("dinii", [head] + FINDINGS)
             browser.close()
             return b""
 

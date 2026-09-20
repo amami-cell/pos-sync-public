@@ -57,10 +57,16 @@ jobs:
       - name: diag-summary
         if: always()
         run: |
-          # 中身は各スクリプトが標準出力に echo 済み。ここで再掲すると
-          # ログのtailが埋まって本体の出力が読めなくなるので一覧だけ。
+          # ステップが2つあるので、先に走った dinii の結論は uleji のログに
+          # 埋もれて読めない。両方の結論をログの末尾にまとめて出す。
+          echo "=== 調査の結論（dinii / uleji） ==="
+          for f in diag/FINDINGS_*.txt; do
+            [ -e "$f" ] || continue
+            echo "---- $f ----"
+            cat "$f"
+          done
           echo "=== diag/ に出力されたファイル ==="
-          ls -la diag/ 2>/dev/null || echo "(diag/ なし)"
+          ls diag/ 2>/dev/null || echo "(diag/ なし)"
       - name: upload-diag
         # 画面の写しは明示的に要求されたときだけ上げる（公開リポジトリのため）
         if: always() && github.event.inputs.diag_files == '1'

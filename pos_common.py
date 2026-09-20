@@ -341,6 +341,15 @@ def probe_form_state(page):
         print(f"  | {d['type']}\tid={d['id']}\tname={d['name']}\tph={d['ph']}\t空={d['empty']}{chk}")
 
 
+def write_findings(tag: str, lines: list[str], outdir: str = "diag"):
+    """調査の結論をファイルにも残す。ステップが2つあるとログのtailが後続で
+    埋まり、先に走った方の結論が読めなくなるため、最後にまとめてcatできるようにする。"""
+    import os as _os
+    _os.makedirs(outdir, exist_ok=True)
+    with open(f"{outdir}/FINDINGS_{tag}.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def mask_numbers(text: str) -> str:
     """数字を伏せる。公開リポジトリのログに売上・原価の実数を残さないため。
     項目名や画面の構造だけが残る。"""

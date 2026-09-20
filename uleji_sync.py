@@ -169,7 +169,9 @@ def _click_maybe_popup(page, text: str, wait_ms: int = 5000):
 FORBIDDEN = ("登録", "CSV一括設定", "削除", "更新", "取込", "アップロード")
 
 # 落とすだけのボタン。押すとファイルが降ってくる想定。
-CSV_BUTTONS = ("CSVダウンロード", "CSV出力", "ダウンロード", "出力")
+# 文字が "CSV" だけのボタンもある（損益PL集計の画面）。完全一致で探すので
+# 「CSV一括設定」のような書き込み系には当たらない。具体的な名前から順に試す。
+CSV_BUTTONS = ("CSVダウンロード", "CSV出力", "ダウンロード", "出力", "CSV")
 
 
 def _try_csv(page, label: str, tag: str):
@@ -569,6 +571,7 @@ def fetch_csv(ym: str) -> tuple[bytes, dict]:
             print("==== ulejiまとめ（ここが結論） ====")
             for line in FINDINGS:
                 print(f"  {line}")
+            C.write_findings("uleji", FINDINGS)
             browser.close()
             return b"", {}
 
