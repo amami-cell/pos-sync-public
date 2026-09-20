@@ -255,6 +255,10 @@ def _select_pl_period(page, ym: str) -> bool:
         return False
     if not found.get("ok"):
         _note(f"[PL期間] {found.get('why')}")
+        # 期間は input ではなく div 側に出ている（実測: 唯一の input は空で
+        # readonly でもなく、画面の 2026年09月20日-2026年09月20日 は別の要素）。
+        # ピッカーを開いて中身を出す。ここで諦めると次も同じところで止まる。
+        _open_period_picker(page)
         return False
     if found.get("readonly"):
         # 読み取り専用ならピッカーを開かないと変えられない。ここで黙って
@@ -281,6 +285,85 @@ def _select_pl_period(page, ym: str) -> bool:
     _note(f"[PL期間] **合わせられなかった。** 期待 {want} / 画面 {shown}")
     _note("[PL期間] このまま落とすと当月のCSVを対象月として取り込むので、中止する")
     return False
+
+
+def _open_period_picker(page) -> bool:
+    """期間の表示（`2026年09月20日-2026年09月20日`）を押してピッカーを開き、
+    中身を棚卸しする。
+
+    実測では期間は `<input>` に入っておらず、Vuetify の `v-field` の中に
+    テキストとして出ている。押すとオーバーレイが開く作りのはずなので、
+    開いた先に何があるか（カレンダーなのか、年月の一覧なのか）を見てから
+    操作を書く。**ここで当てずっぽうに進めない。**"""
+    try:
+        hit = page.evaluate(
+            r"""() => {
+                const re = /\d{4}年\d{2}月\d{2}日/;
+                document.querySelectorAll('[data-claude-period]')
+                    .forEach(e => e.removeAttribute('data-claude-period'));
+                // 年月日を含む「いちばん内側」の要素を選ぶ。外側を押すと
+                // 画面全体を押すことになり、別のものが開く。
+                const cands = [...document.querySelectorAll('*')].filter(
+                    el => el.children.length === 0 && re.test((el.textContent || '').trim()));
+                if (!cands.length) return { ok: false, why: '年月日の表示が見つからない' };
+                const el = cands[cands.length - 1];
+                // 押せるのは器のほう（v-field）なので、近い祖先を探して押す
+                let t = el;
+                for (let i = 0; i < 5 && t.parentElement; i++, t = t.parentElement) {
+                    if (/v-field|v-input/.test(t.className || '')) break;
+                }
+                t.setAttribute('data-claude-period', '1');
+                return { ok: true, tag: t.tagName.toLowerCase(),
+                         cls: String(t.className || '').slice(0, 60) };
+            }""")
+    except Exception as e:
+        _note(f"[PL期間] 期間の表示を探せなかった: {type(e).__name__}: {e}")
+        return False
+    if not hit.get("ok"):
+        _note(f"[PL期間] {hit.get('why')}")
+        return False
+    _note(f"[PL期間] 期間の器を押してみる: {hit['tag']}.{hit['cls']}")
+    try:
+        page.locator("[data-claude-period='1']").first.click(timeout=5000)
+    except Exception as e:
+        _note(f"[PL期間] 押せなかった: {type(e).__name__}: {e}")
+        return False
+    page.wait_for_timeout(2500)
+    try:
+        info = page.evaluate(
+            r"""() => {
+                const cut = s => (s || '').toString().trim().replace(/\s+/g, ' ').slice(0, 60);
+                const vis = el => el.offsetParent !== null || getComputedStyle(el).position === 'fixed';
+                const overlays = [...document.querySelectorAll(
+                    '.v-overlay, .v-menu, .v-date-picker, [role=dialog], [role=listbox], [role=menu]')]
+                    .filter(vis);
+                const texts = overlays.flatMap(o => (o.innerText || '').split('\n'))
+                    .map(cut).filter(Boolean);
+                const btns = overlays.flatMap(o => [...o.querySelectorAll('button, [role=button], [role=option]')])
+                    .map(b => cut(b.innerText || b.getAttribute('aria-label')))
+                    .filter(Boolean);
+                const inputs = [...document.querySelectorAll('input')].map(i =>
+                    [i.getAttribute('id') || '', i.getAttribute('type') || '',
+                     /\d{4}年\d{2}月\d{2}日/.test(i.value || '') ? 'date値あり' : '',
+                     (i.readOnly || i.getAttribute('readonly') !== null) ? 'readonly' : ''].join('\t'));
+                return { n: overlays.length,
+                         cls: [...new Set(overlays.map(o => cut(o.className)))].slice(0, 8),
+                         texts: [...new Set(texts)].slice(0, 40),
+                         btns: [...new Set(btns)].slice(0, 40),
+                         inputs: [...new Set(inputs)] };
+            }""")
+    except Exception as e:
+        _note(f"[PL期間] 開いた中身を読めなかった: {type(e).__name__}: {e}")
+        return False
+    _note(f"[PL期間] 開いたもの {info['n']}件: {' / '.join(info['cls'])}")
+    _note(f"[PL期間] 中の文字 {len(info['texts'])}件: {' | '.join(info['texts'])}")
+    _note(f"[PL期間] 中の押せるもの {len(info['btns'])}件: {' | '.join(info['btns'])}")
+    _note(f"[PL期間] 押した後の入力欄 {len(info['inputs'])}件:")
+    for line in info["inputs"][:12]:
+        _note(f"      - {line}")
+    if info["n"] == 0:
+        _note("[PL期間] 何も開かなかった。押す先が違うか、別の操作が要る")
+    return info["n"] > 0
 
 
 def _period_probe(page, label: str):
