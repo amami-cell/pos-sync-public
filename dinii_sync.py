@@ -520,6 +520,31 @@ def _find_cost_export(page):
 DINII_FORBIDDEN = ("登録", "取込", "アップロード", "一括", "削除", "更新", "保存")
 
 
+def _buttons_note(page, label: str):
+    """押せるものを、アイコン名まで含めてまとめメモに残す。
+    ダイニーのDLボタンは文字を持たずアイコンのクラス名しか手掛かりが無いことがある。"""
+    try:
+        items = page.evaluate(
+            r"""() => [...new Set([...document.querySelectorAll(
+                'button, a[role=button], [role=button], .ant-btn')]
+                .filter(e => e.offsetParent !== null)
+                .map(e => {
+                    const t = (e.innerText || '').trim().replace(/\s+/g, ' ');
+                    const icon = [...e.querySelectorAll('[class*=anticon-]')]
+                        .map(i => (i.className.baseVal || i.className || '')
+                            .toString().match(/anticon-[\w-]+/))
+                        .filter(Boolean).map(m => m[0]).join(',');
+                    const label = e.getAttribute('aria-label') || e.getAttribute('title') || '';
+                    return [t || '(文字なし)', icon ? 'icon=' + icon : '',
+                            label ? 'label=' + label : ''].filter(Boolean).join(' ');
+                }))]""")
+        _note(f"[{label}] 押せるもの {len(items)}件:")
+        for t in items[:30]:
+            _note(f"      - {_mask_numbers(t)[:80]}")
+    except Exception as e:
+        _note(f"[{label}] ボタンの列挙に失敗: {e}")
+
+
 def _cost_lines_dinii(page, label: str):
     """原価まわりの行を、数字を伏せて拾う。どんな粒度で持っているかを見るため。"""
     try:
@@ -595,7 +620,9 @@ def _explore(page, path: str, tag: str):
         _collect_cost_context(page, path)
         if any(k in path for k in ("Pl", "customReports")):
             _cost_lines_dinii(page, path)
-            _try_csv_dinii(page, path, tag)
+            _buttons_note(page, path)
+            if not _try_csv_dinii(page, path, tag):
+                _note(f"[{path}] 落とせるボタンが見つからなかった")
         if "flDashboard" in path:
             _cost_coverage(page)
             # サポート回答（2026-09）より、原価の出口は
