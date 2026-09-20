@@ -51,18 +51,37 @@ def run(name, msgs, not_before, expect):
     print(f"{ok}{name}: 期待={expect} 実際={got}")
     return got == expect
 
-old = now - datetime.timedelta(hours=3)
-ok = True
-ok &= run("USENのメールだけ", [mail(*USEN, now)], now, "123456")
-ok &= run("他サービスの認証コードは拾わない", [mail(*GOOGLE, now)], now, None)
-ok &= run("両方あってもUSENを選ぶ", [mail(*GOOGLE, now), mail(*USEN, now)], now, "123456")
-ok &= run("古いメールは無視", [mail(*USEN, old)], now, None)
 FORWARDED = ("ガルーン <amami@example.co.jp>", "Fwd: 【USENレジ】認証コードのお知らせ",
              "---------- 転送メッセージ ----------\n"
              "From: USENレジ <no-reply@pos.usen-regi.com>\n\n"
              "認証コード：123456\n")
-ok &= run("転送で差出人が書き換わっても拾う", [mail(*FORWARDED, now)], now, "123456")
-ok &= run("差出人が違えば件名が同じでも無視",
-          [mail("偽 <a@example.com>", USEN[1], USEN[2], now)], now, None)
-print("---", "全部通りました" if ok else "失敗あり")
-sys.exit(0 if ok else 1)
+
+
+def test_otp_mails():
+    """pytest からも `python tests/test_otp.py` からも同じ判定を通す。
+
+    以前は判定をモジュール直下に書いて最後に sys.exit していた。
+    pytest は収集のためにモジュールを読むので、**収集の途中で SystemExit が飛び、
+    リポジトリ全体の pytest が INTERNALERROR で落ちていた**（テスト自体は通るのに、
+    他のテストを一件も走らせずに終わる）。関数に包んで exit は __main__ だけにする。"""
+    old = now - datetime.timedelta(hours=3)
+    ok = True
+    ok &= run("USENのメールだけ", [mail(*USEN, now)], now, "123456")
+    ok &= run("他サービスの認証コードは拾わない", [mail(*GOOGLE, now)], now, None)
+    ok &= run("両方あってもUSENを選ぶ", [mail(*GOOGLE, now), mail(*USEN, now)], now, "123456")
+    ok &= run("古いメールは無視", [mail(*USEN, old)], now, None)
+    ok &= run("転送で差出人が書き換わっても拾う", [mail(*FORWARDED, now)], now, "123456")
+    ok &= run("差出人が違えば件名が同じでも無視",
+              [mail("偽 <a@example.com>", USEN[1], USEN[2], now)], now, None)
+    assert ok, "認証コードの取り出しに失敗したケースがあります（上のNGを見てください）"
+
+
+if __name__ == "__main__":
+    try:
+        test_otp_mails()
+    except AssertionError as e:
+        print("---", "失敗あり")
+        print(e)
+        sys.exit(1)
+    print("---", "全部通りました")
+    sys.exit(0)
