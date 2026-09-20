@@ -337,10 +337,55 @@ def _cost_coverage(page):
             _note(f"        {_mask_numbers(' | '.join(r['segs']))}")
 
 
+# ダイニーのサポート回答（2026-09）で、原価の出口が判明した。
+#   ダッシュボード ＞ [経営管理タブ] ＞ [CSVダウンロード]
+#     - 原価集計（日別） … ※実原価は「ダイニー経営管理契約店舗」のみ
+#     - 出数集計        … 販売数。メニュー原価と掛けて商品別総原価を出せる
+# こちらが今まで見ていた「データ出力・連携」(/aggregatedData/daily/export) とは
+# **別の画面**。あちらの15帳票に原価が無かったのは当然で、場所が違っていた。
+# 参考: https://dinii.wraptas.site/5d140f1f09354f109133e04a246594df
 EXPLORE_PATHS = [
     ("/bi/flDashboard", "dinii_10_fl"),
     ("/aggregatedData/menu/export", "dinii_11_menu_export"),
 ]
+
+
+def _find_cost_export(page):
+    """経営管理の画面から「CSVダウンロード」へ辿る。
+    URLを当てずに、画面にあるリンク・ボタンから探す（当て推量のURLはSPAを
+    壊すことがある。新Uレジでセッションごと落とした）。"""
+    try:
+        hrefs = page.evaluate(
+            r"""() => [...new Set([...document.querySelectorAll('a[href]')]
+                .map(e => e.getAttribute('href'))
+                .filter(h => h && !/\.(css|js|woff2?|ttf|eot|svg|png|jpg)/.test(h)))]""")
+        _note(f"[経営管理] 画面内のリンク {len(hrefs)}件: {' / '.join(hrefs[:25])}")
+    except Exception as e:
+        _note(f"[経営管理] リンクの列挙に失敗: {e}")
+
+    for name in ("CSVダウンロード", "CSV出力", "ダウンロード", "CSV"):
+        try:
+            loc = page.get_by_text(name, exact=True)
+            hit = None
+            for i in range(min(loc.count(), 5)):
+                if loc.nth(i).is_visible():
+                    hit = loc.nth(i)
+                    break
+            if hit is None:
+                continue
+            before = page.url
+            hit.click(timeout=5000)
+            page.wait_for_timeout(5000)
+            _note(f"[経営管理] 『{name}』を押した → {page.url}"
+                  f"{'（画面は変わらず）' if page.url == before else ''}")
+            C.diag_dump(page, "dinii_12_fl_export")
+            _collect_checkbox_labels(page)
+            _collect_cost_context(page, "経営管理のCSVダウンロード")
+            return True
+        except Exception as e:
+            _note(f"[経営管理] 『{name}』の操作に失敗: {type(e).__name__}")
+    _note("[経営管理] CSVダウンロードへの導線が画面から見つからなかった")
+    return False
 
 
 def _explore(page, path: str, tag: str):
@@ -359,6 +404,12 @@ def _explore(page, path: str, tag: str):
         _collect_cost_context(page, path)
         if "flDashboard" in path:
             _cost_coverage(page)
+            # サポート回答（2026-09）より、原価の出口は
+            # ダッシュボード ＞ 経営管理タブ ＞ CSVダウンロード。
+            #   原価集計（日別）… ※実原価はダイニー経営管理契約店舗のみ
+            #   出数集計       … 販売数×メニュー原価で商品別総原価
+            # 今まで見ていた「データ出力・連携」とは別の画面だった。
+            _find_cost_export(page)
         # 画面に原価らしき語があるかを確認（数字は出さない）
         try:
             body = page.inner_text("body")
