@@ -60,7 +60,8 @@ jobs:
           # ステップが2つあるので、先に走った dinii の結論は uleji のログに
           # 埋もれて読めない。両方の結論をログの末尾にまとめて出す。
           echo "=== 調査の結論（dinii / uleji） ==="
-          for f in diag/FINDINGS_*.txt; do
+          # 逆順にして、今いちばん知りたい dinii を末尾に置く
+          for f in $(ls -r diag/FINDINGS_*.txt 2>/dev/null); do
             [ -e "$f" ] || continue
             echo "---- $f ----"
             cat "$f"

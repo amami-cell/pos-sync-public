@@ -354,12 +354,28 @@ def _find_cost_export(page):
     """経営管理の画面から「CSVダウンロード」へ辿る。
     URLを当てずに、画面にあるリンク・ボタンから探す（当て推量のURLはSPAを
     壊すことがある。新Uレジでセッションごと落とした）。"""
+    # 文字とhrefを対にして出す。hrefだけだと、どれが「CSVダウンロード」か分からない。
+    # 折りたたまれたメニューの中にあるはずなので、隠れているものも含めて全部出す。
     try:
-        hrefs = page.evaluate(
-            r"""() => [...new Set([...document.querySelectorAll('a[href]')]
-                .map(e => e.getAttribute('href'))
-                .filter(h => h && !/\.(css|js|woff2?|ttf|eot|svg|png|jpg)/.test(h)))]""")
-        _note(f"[経営管理] 画面内のリンク {len(hrefs)}件: {' / '.join(hrefs[:25])}")
+        pairs = page.evaluate(
+            r"""() => {
+                const seen = new Set(), out = [];
+                for (const a of document.querySelectorAll('a[href]')) {
+                    const h = a.getAttribute('href') || '';
+                    if (!h || /\.(css|js|woff2?|ttf|eot|svg|png|jpg)(\?|$)/.test(h)) continue;
+                    const t = (a.innerText || a.getAttribute('aria-label')
+                               || a.getAttribute('title') || '').trim().replace(/\s+/g, ' ');
+                    const key = t + ' → ' + h;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    out.push((t || '(文字なし)') + ' → ' + h
+                             + (a.offsetParent === null ? ' [隠]' : ''));
+                }
+                return out;
+            }""")
+        _note(f"[経営管理] 画面内のリンク {len(pairs)}件（文字→href、[隠]は非表示）:")
+        for t in pairs[:40]:
+            _note(f"      - {t}")
     except Exception as e:
         _note(f"[経営管理] リンクの列挙に失敗: {e}")
 
