@@ -594,6 +594,28 @@ def _explore_menu(page, parent: str | None, child: str, tag: str):
         _note(f"[{child}] 調査に失敗: {e}")
 
 
+def _otp_error_text(page) -> str:
+    """認証画面が出しているエラー文を拾う。
+
+    コード自体はログにも出さないので、ここでも6桁の並びは伏せる。
+    短時間に何度も試すと「回数を超えました」の類が出ることがあり、
+    その場合は**間を置く**のが正しい対応。再試行を重ねると悪化する。"""
+    try:
+        texts = page.evaluate(
+            r"""() => {
+                const cut = s => (s || '').toString().trim().replace(/\s+/g, ' ').slice(0, 120);
+                const sel = '.error, .is-error, .alert, .message, [role=alert],'
+                          + '[class*=error], [class*=alert], [class*=message]';
+                return [...new Set([...document.querySelectorAll(sel)]
+                    .filter(el => el.offsetParent !== null)
+                    .map(el => cut(el.innerText))
+                    .filter(Boolean))].slice(0, 6);
+            }""")
+    except Exception:
+        return ""
+    return " / ".join(C.mask_numbers(t) for t in texts)
+
+
 def _submit_otp(page) -> bool:
     """メールで届く認証コードを取得して入力し、認証まで進める。
     コードはログインを実行しているこのプロセス自身が取りに行く（人手を挟まない）。"""
@@ -637,7 +659,14 @@ def _submit_otp(page) -> bool:
     still = detect_otp(page)
     if still:
         C.diag_dump(page, "uleji_otp_rejected")
-        raise RuntimeError("[uleji] 認証コードを入力しましたが、まだ認証画面のままです")
+        # **画面が出しているエラー文を必ず拾う。** これが無いと
+        # 「コードが違う」のか「試行回数を超えた／アカウントがロックされた」のか
+        # 区別できず、原因の分からないまま再試行して事態を悪くする。
+        why = _otp_error_text(page)
+        raise RuntimeError(
+            "[uleji] 認証コードを入力しましたが、まだ認証画面のままです"
+            + (f"（画面のメッセージ: {why}）" if why else "（画面にメッセージは出ていない）")
+        )
     print("[uleji] 認証コードによるログインに成功しました")
     return True
 
