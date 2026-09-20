@@ -287,83 +287,123 @@ def _select_pl_period(page, ym: str) -> bool:
     return False
 
 
-def _open_period_picker(page) -> bool:
-    """期間の表示（`2026年09月20日-2026年09月20日`）を押してピッカーを開き、
-    中身を棚卸しする。
+_OVERLAY_SEL = ('.v-overlay, .v-menu, .v-date-picker, .v-picker, '
+                '[role=dialog], [role=listbox], [role=menu]')
 
-    実測では期間は `<input>` に入っておらず、Vuetify の `v-field` の中に
-    テキストとして出ている。押すとオーバーレイが開く作りのはずなので、
-    開いた先に何があるか（カレンダーなのか、年月の一覧なのか）を見てから
-    操作を書く。**ここで当てずっぽうに進めない。**"""
+
+def _overlay_sig(page) -> list:
+    """いま見えているオーバーレイの見分け（クラス＋先頭の文字）。
+
+    この画面は**元から** v-list / v-overlay を持っている（左メニューや
+    全店舗/グループ/1店舗 の切替）。開いたものを数えるだけだと、
+    押す前から在るものを「開いた」と誤報する。前後で差を取るために使う。"""
     try:
-        hit = page.evaluate(
-            r"""() => {
-                const re = /\d{4}年\d{2}月\d{2}日/;
-                document.querySelectorAll('[data-claude-period]')
-                    .forEach(e => e.removeAttribute('data-claude-period'));
-                // 年月日を含む「いちばん内側」の要素を選ぶ。外側を押すと
-                // 画面全体を押すことになり、別のものが開く。
-                const cands = [...document.querySelectorAll('*')].filter(
-                    el => el.children.length === 0 && re.test((el.textContent || '').trim()));
-                if (!cands.length) return { ok: false, why: '年月日の表示が見つからない' };
-                const el = cands[cands.length - 1];
-                // 押せるのは器のほう（v-field）なので、近い祖先を探して押す
-                let t = el;
-                for (let i = 0; i < 5 && t.parentElement; i++, t = t.parentElement) {
-                    if (/v-field|v-input/.test(t.className || '')) break;
-                }
-                t.setAttribute('data-claude-period', '1');
-                return { ok: true, tag: t.tagName.toLowerCase(),
-                         cls: String(t.className || '').slice(0, 60) };
-            }""")
-    except Exception as e:
-        _note(f"[PL期間] 期間の表示を探せなかった: {type(e).__name__}: {e}")
-        return False
-    if not hit.get("ok"):
-        _note(f"[PL期間] {hit.get('why')}")
-        return False
-    _note(f"[PL期間] 期間の器を押してみる: {hit['tag']}.{hit['cls']}")
-    try:
-        page.locator("[data-claude-period='1']").first.click(timeout=5000)
-    except Exception as e:
-        _note(f"[PL期間] 押せなかった: {type(e).__name__}: {e}")
-        return False
-    page.wait_for_timeout(2500)
+        return page.evaluate(
+            r"""(sel) => [...document.querySelectorAll(sel)]
+                .filter(el => el.offsetParent !== null
+                              || getComputedStyle(el).position === 'fixed')
+                .map(el => String(el.className || '').slice(0, 40) + '#'
+                           + (el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 40))""",
+            _OVERLAY_SEL)
+    except Exception:
+        return []
+
+
+def _open_period_picker(page) -> bool:
+    """期間のピッカーを開いて中身を棚卸しする。
+
+    前回は「年月日を含むいちばん内側の要素」から祖先を辿ったが、5段では
+    `v-field` に届かず `div.v-row`（行全体）を押していた。押しても何も開かず、
+    元から在った左メニューを「開いた」と誤報した。
+
+    この画面の `v-field` は1つだけなので、**それを直に押す**。Vuetify は
+    追加アイコン（`v-field__append-inner`）側が入口のこともあるので、
+    そちらから順に試し、**押す前後でオーバーレイの差を取って**本当に開いたか
+    を判定する。"""
     try:
         info = page.evaluate(
             r"""() => {
-                const cut = s => (s || '').toString().trim().replace(/\s+/g, ' ').slice(0, 60);
-                const vis = el => el.offsetParent !== null || getComputedStyle(el).position === 'fixed';
-                const overlays = [...document.querySelectorAll(
-                    '.v-overlay, .v-menu, .v-date-picker, [role=dialog], [role=listbox], [role=menu]')]
-                    .filter(vis);
-                const texts = overlays.flatMap(o => (o.innerText || '').split('\n'))
-                    .map(cut).filter(Boolean);
-                const btns = overlays.flatMap(o => [...o.querySelectorAll('button, [role=button], [role=option]')])
+                const cut = s => (s || '').toString().trim().replace(/\s+/g, ' ').slice(0, 80);
+                document.querySelectorAll('[data-claude-period]')
+                    .forEach(e => e.removeAttribute('data-claude-period'));
+                const fields = [...document.querySelectorAll('.v-field')];
+                if (!fields.length) return { ok: false, why: 'v-field が無い' };
+                const f = fields[0];
+                const targets = [];
+                const app = f.querySelector('.v-field__append-inner, .v-field__append, [class*=append]');
+                if (app) targets.push(app);
+                targets.push(f);
+                targets.forEach((el, i) => el.setAttribute('data-claude-period', String(i + 1)));
+                return { ok: true, n: targets.length, text: cut(f.innerText),
+                         cls: cut(f.className) };
+            }""")
+    except Exception as e:
+        _note(f"[PL期間] v-field を探せなかった: {type(e).__name__}: {e}")
+        return False
+    if not info.get("ok"):
+        _note(f"[PL期間] {info.get('why')}")
+        return False
+    _note(f"[PL期間] v-field: {info['cls']}")
+    _note(f"[PL期間] v-field の中身: {info['text']}")
+
+    before = _overlay_sig(page)
+    _note(f"[PL期間] 押す前から見えているオーバーレイ {len(before)}件")
+    for i in range(1, info["n"] + 1):
+        what = "追加アイコン" if (i == 1 and info["n"] > 1) else "v-field 本体"
+        try:
+            page.locator(f"[data-claude-period='{i}']").first.click(timeout=5000)
+        except Exception as e:
+            _note(f"[PL期間] {what}を押せなかった: {type(e).__name__}")
+            continue
+        page.wait_for_timeout(2500)
+        after = _overlay_sig(page)
+        fresh = [a for a in after if a not in before]
+        if not fresh:
+            _note(f"[PL期間] {what}を押したが、新しく開いたものは無い")
+            continue
+        _note(f"[PL期間] {what}で開いた: {len(fresh)}件")
+        for a in fresh[:6]:
+            _note(f"      - {a}")
+        _dump_open_picker(page)
+        return True
+    _note("[PL期間] どれを押しても何も開かなかった。別の入口があるはず")
+    return False
+
+
+def _dump_open_picker(page):
+    """開いたピッカーの中身（押せるもの・入力欄）を出す。
+
+    カレンダーなのか年月の一覧なのかで操作の書き方が変わるので、
+    **形が分かるまで操作を書かない。**"""
+    try:
+        info = page.evaluate(
+            r"""(sel) => {
+                const cut = s => (s || '').toString().trim().replace(/\s+/g, ' ').slice(0, 40);
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const ov = [...document.querySelectorAll(sel)].filter(vis);
+                const btns = ov.flatMap(o => [...o.querySelectorAll(
+                    'button, [role=button], [role=option], [role=gridcell], td, th')])
                     .map(b => cut(b.innerText || b.getAttribute('aria-label')))
                     .filter(Boolean);
                 const inputs = [...document.querySelectorAll('input')].map(i =>
                     [i.getAttribute('id') || '', i.getAttribute('type') || '',
                      /\d{4}年\d{2}月\d{2}日/.test(i.value || '') ? 'date値あり' : '',
-                     (i.readOnly || i.getAttribute('readonly') !== null) ? 'readonly' : ''].join('\t'));
-                return { n: overlays.length,
-                         cls: [...new Set(overlays.map(o => cut(o.className)))].slice(0, 8),
-                         texts: [...new Set(texts)].slice(0, 40),
-                         btns: [...new Set(btns)].slice(0, 40),
-                         inputs: [...new Set(inputs)] };
-            }""")
+                     (i.readOnly || i.getAttribute('readonly') !== null) ? 'readonly' : ''
+                    ].join('\t'));
+                // カレンダーかどうかの決め手
+                const cal = !!document.querySelector(
+                    '.v-date-picker, .v-picker, [class*=calendar], [role=grid]');
+                return { btns: [...new Set(btns)].slice(0, 50), inputs, cal };
+            }""", _OVERLAY_SEL)
     except Exception as e:
         _note(f"[PL期間] 開いた中身を読めなかった: {type(e).__name__}: {e}")
-        return False
-    _note(f"[PL期間] 開いたもの {info['n']}件: {' / '.join(info['cls'])}")
-    _note(f"[PL期間] 中の文字 {len(info['texts'])}件: {' | '.join(info['texts'])}")
+        return
+    _note(f"[PL期間] カレンダーらしき器: {'あり' if info['cal'] else 'なし'}")
     _note(f"[PL期間] 中の押せるもの {len(info['btns'])}件: {' | '.join(info['btns'])}")
-    _note(f"[PL期間] 押した後の入力欄 {len(info['inputs'])}件:")
+    _note(f"[PL期間] 入力欄 {len(info['inputs'])}件:")
     for line in info["inputs"][:12]:
         _note(f"      - {line}")
-    if info["n"] == 0:
-        _note("[PL期間] 何も開かなかった。押す先が違うか、別の操作が要る")
-    return info["n"] > 0
 
 
 def _period_probe(page, label: str):
