@@ -344,9 +344,17 @@ def _cost_coverage(page):
 # こちらが今まで見ていた「データ出力・連携」(/aggregatedData/daily/export) とは
 # **別の画面**。あちらの15帳票に原価が無かったのは当然で、場所が違っていた。
 # 参考: https://dinii.wraptas.site/5d140f1f09354f109133e04a246594df
+# run #24 で経営管理のサイドバーが読めた。**CSVダウンロードという項目は無い。**
+#   POSデータ分析 → オプション出数一覧 / 調理・配膳時間分析 / 推しエール分析 …
+#   PL           → 全店舗 /bi/monthlyPl / 店舗 月別 /bi/monthlyPlShop
+#                  / 店舗 日別 /bi/dailyPl
+#   取引登録      → 仕入れ登録 / 小口現金登録 / 収入支出登録（**書き込み。触らない**）
+# 新Uレジで原価が取れたのも損益PL集計の画面だったので、PLの3画面を直接見る。
 EXPLORE_PATHS = [
     ("/bi/flDashboard", "dinii_10_fl"),
-    ("/aggregatedData/menu/export", "dinii_11_menu_export"),
+    ("/bi/monthlyPlShop", "dinii_13_pl_shop"),
+    ("/bi/dailyPl", "dinii_14_pl_daily"),
+    ("/bi/customReports", "dinii_15_custom"),
 ]
 
 
@@ -508,6 +516,69 @@ def _find_cost_export(page):
     return False
 
 
+# 押してはいけないもの。ダイニーの取引登録系は書き込み画面。
+DINII_FORBIDDEN = ("登録", "取込", "アップロード", "一括", "削除", "更新", "保存")
+
+
+def _cost_lines_dinii(page, label: str):
+    """原価まわりの行を、数字を伏せて拾う。どんな粒度で持っているかを見るため。"""
+    try:
+        body = page.inner_text("body")
+    except Exception:
+        return
+    hits, seen = [], set()
+    for l in body.split("\n"):
+        l = l.strip()
+        if not any(w in l for w in ("原価", "仕入", "粗利", "FL", "F/L", "損益")):
+            continue
+        m = _mask_numbers(l)[:90]
+        if m not in seen:
+            seen.add(m); hits.append(m)
+    if not hits:
+        _note(f"[{label}] 原価の行は見つからなかった")
+        return
+    _note(f"[{label}] 原価まわりの表示 {len(hits)}行（数字は伏せています）:")
+    for m in hits[:15]:
+        _note(f"      - {m}")
+
+
+def _try_csv_dinii(page, label: str, tag: str) -> bool:
+    """CSVを落とすボタンがあれば押して、列名だけを記録する。
+    ダイニーのDLボタンは文字を持たないアイコン（anticon-download）のことがある。"""
+    selectors = [
+        "button:has-text('CSVダウンロード')",
+        "button:has-text('CSV出力')",
+        "button:has-text('ダウンロード')",
+        "button:has-text('CSV')",
+        "button:has(.anticon-download)",
+        "button[aria-label='download']",
+    ]
+    for sel in selectors:
+        try:
+            btn = page.locator(sel).first
+            if btn.count() == 0 or not btn.is_visible():
+                continue
+            text = (btn.inner_text() or "").strip()
+            if any(ng in text for ng in DINII_FORBIDDEN):
+                _note(f"[{label}] 『{text}』は書き込みの恐れがあるので押さない")
+                continue
+            with page.expect_download(timeout=180000) as dl:
+                btn.click(timeout=6000)
+            data = open(dl.value.path(), "rb").read()
+            _note(f"[{label}] {sel} でファイルを取得: {C.sniff_bytes(data)}")
+            rows = C.parse_csv_bytes(data)
+            header = list(rows[0].keys()) if rows else []
+            _note(f"[{label}] CSV {len(rows)}行 / {len(header)}列")
+            _note(f"[{label}] 列名: {' | '.join(header[:60])}")
+            cost = [h for h in header if any(w in h for w in ("原価", "仕入", "粗利", "FL", "F/L"))]
+            _note(f"[{label}] 原価らしき列: {cost if cost else 'なし'}")
+            C.describe_csv(data, tag + "_dl")
+            return True
+        except Exception as e:
+            _note(f"[{label}] {sel} では落ちてこなかった: {type(e).__name__}")
+    return False
+
+
 def _explore(page, path: str, tag: str):
     """指定パスを開いて構造を吐く。原価が取れる画面と導線を特定するため。"""
     base = _base()
@@ -522,6 +593,9 @@ def _explore(page, path: str, tag: str):
         # 文字で探しても引っかからないので、アイコン側からも探す
         C.probe_icon_buttons(page)
         _collect_cost_context(page, path)
+        if any(k in path for k in ("Pl", "customReports")):
+            _cost_lines_dinii(page, path)
+            _try_csv_dinii(page, path, tag)
         if "flDashboard" in path:
             _cost_coverage(page)
             # サポート回答（2026-09）より、原価の出口は
