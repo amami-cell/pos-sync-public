@@ -205,6 +205,84 @@ def _try_csv(page, label: str, tag: str):
             _note(f"[{label}] 『{name}』では落ちてこなかった: {type(e).__name__}")
 
 
+import calendar as _calendar
+
+
+def _month_range_label(ym: str) -> tuple[str, str]:
+    """'2026-08' → ('2026年08月01日', '2026年08月31日')。画面の表記に合わせる。
+
+    画面に出ていたのは `2026年09月20日-2026年09月20日`（＝今日だけ）。
+    CSVは**画面の期間ぶん1行**なので、ここを月初〜月末にしないと当月しか取れない。"""
+    year, month = (int(x) for x in ym.split("-"))
+    last = _calendar.monthrange(year, month)[1]
+    return f"{year}年{month:02d}月01日", f"{year}年{month:02d}月{last:02d}日"
+
+
+def _select_pl_period(page, ym: str) -> bool:
+    """損益PL集計の期間を対象月（月初〜月末）に合わせる。合ったかを返す。
+
+    この画面は Vuetify（`v-field`）で、期間は**1つのテキスト入力**に
+    `2026年09月20日-2026年09月20日` の形で入っている。id は `input-64` のような
+    **自動採番で毎回変わる**ので、idでは掴めない。値の形（YYYY年MM月DD日）で探す。
+
+    **必ず入れ直したあとに画面を読み直して確かめる。** ここを省くと
+    「合わせたつもりで当月のまま」になり、どの月を指定しても同じ数字が入る
+    という、いちばん気づきにくい壊れ方をする。"""
+    start, end = _month_range_label(ym)
+    want = f"{start}-{end}"
+    try:
+        found = page.evaluate(
+            r"""(want) => {
+                const re = /\d{4}年\d{2}月\d{2}日/;
+                document.querySelectorAll('[data-claude-period]')
+                    .forEach(e => e.removeAttribute('data-claude-period'));
+                const el = [...document.querySelectorAll('input')]
+                    .find(i => re.test(i.value || ''));
+                if (!el) return { ok: false, why: '年月日の形の入力欄が無い' };
+                el.setAttribute('data-claude-period', '1');
+                const ro = el.readOnly || el.getAttribute('readonly') !== null;
+                // Vue は value を直接書いても気づかない。setter を呼んでから
+                // input/change を投げる（これをしないと画面だけ変わって中身が古いまま）
+                const setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype, 'value').set;
+                setter.call(el, want);
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return { ok: true, readonly: ro };
+            }""", want)
+    except Exception as e:
+        _note(f"[PL期間] 期間の入力欄を操作できなかった: {type(e).__name__}: {e}")
+        return False
+    if not found.get("ok"):
+        _note(f"[PL期間] {found.get('why')}")
+        return False
+    if found.get("readonly"):
+        # 読み取り専用ならピッカーを開かないと変えられない。ここで黙って
+        # 先に進むと当月のCSVを「対象月のもの」として取り込んでしまう。
+        _note("[PL期間] 入力欄が読み取り専用。値の直接入力では変えられない")
+    try:
+        page.locator("[data-claude-period='1']").first.press("Enter", timeout=4000)
+    except Exception:
+        pass
+    page.wait_for_timeout(4000)
+
+    # ---- 確認: 画面がほんとうに対象月になったか ----
+    try:
+        shown = page.evaluate(
+            r"""() => [...document.querySelectorAll('input')]
+                .map(i => i.value || '')
+                .filter(v => /\d{4}年\d{2}月\d{2}日/.test(v))""")
+    except Exception as e:
+        _note(f"[PL期間] 画面を読み直せなかった: {type(e).__name__}: {e}")
+        return False
+    if any(want in v for v in shown):
+        _note(f"[PL期間] {ym} に合わせた（{want}）")
+        return True
+    _note(f"[PL期間] **合わせられなかった。** 期待 {want} / 画面 {shown}")
+    _note("[PL期間] このまま落とすと当月のCSVを対象月として取り込むので、中止する")
+    return False
+
+
 def _period_probe(page, label: str):
     """期間（年月）を指定する部品の正体を暴く。損益PL集計のCSVは
     **画面の期間ぶん1行しか落ちない**ので、月を指定できないと当月しか取れない。
@@ -224,9 +302,17 @@ def _period_probe(page, label: str):
                 const fields = [...document.querySelectorAll('input,select,textarea')].map(el => {
                     const opts = el.tagName === 'SELECT'
                         ? [...el.options].slice(0, 16).map(o => cut(o.text)).join(',') : '';
+                    // 値そのものは出さない（認証情報が入りうる）。ただし
+                    // 「年月日が入っているか」と readonly かは、期間を入れられるか
+                    // どうかの決め手なので出す。
+                    const dateish = /\d{4}年\d{2}月\d{2}日|\d{4}[/-]\d{2}[/-]\d{2}/
+                        .test(el.value || '') ? 'date値あり' : '';
+                    const ro = (el.readOnly || el.getAttribute('readonly') !== null)
+                        ? 'readonly' : '';
                     return [el.tagName.toLowerCase(), el.getAttribute('type') || '',
                             el.getAttribute('name') || '', el.getAttribute('id') || '',
-                            cut(el.getAttribute('placeholder')), cut(el.className), opts].join('\t');
+                            cut(el.getAttribute('placeholder')), cut(el.className),
+                            dateish, ro, opts].join('\t');
                 });
                 // 日付ピッカーが div で出来ている場合に備えて、それらしい器も拾う
                 const picky = [...document.querySelectorAll(
@@ -306,7 +392,16 @@ def _open_card(page, label: str, tag: str) -> bool:
         _screen_report(page, f"分析({label})")
         _cost_lines(page, f"分析({label})")
         _period_probe(page, f"分析({label})")
-        _try_csv(page, f"分析({label})", f"{tag}_{label}")
+        # CSVは**画面の期間ぶん1行**。既定は今日だけなので、月初〜月末に
+        # 合わせてから落とす。合わせられなければ落とさない（当月のCSVを
+        # 対象月のものとして取り込むほうが、取れないことより悪い）。
+        ym = globals().get("TARGET_YM")
+        if ym and _select_pl_period(page, ym):
+            _try_csv(page, f"分析({label} {ym})", f"{tag}_{label}_{ym}")
+        elif ym:
+            _note(f"[分析({label})] 期間を {ym} に合わせられないのでCSVは落とさない")
+        else:
+            _try_csv(page, f"分析({label})", f"{tag}_{label}")
         return True
     except Exception as e:
         _note(f"[分析] 『{label}』のカード操作に失敗: {type(e).__name__}: {e}")
@@ -607,6 +702,7 @@ def fetch_csv(ym: str) -> tuple[bytes, dict]:
     """CSVと、店舗コード→店舗名の対応表を返す。CSVには店舗コードしか
     入っていないので、店舗名は画面のセレクトから取る。"""
     company = C.env("ULEJI_COMPANY"); user = C.env("ULEJI_USER"); pw = C.env("ULEJI_PASS")
+    globals()["TARGET_YM"] = ym
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         ctx = browser.new_context(accept_downloads=True)
@@ -735,6 +831,8 @@ def normalize(rows: list[dict], ym: str, store_names: dict | None = None) -> lis
 
 def main():
     ym = C.last_month(sys.argv[1] if len(sys.argv) > 1 else None)
+    # 診断の中からも対象月が要る（PL集計の期間を合わせるため）。
+    globals()["TARGET_YM"] = ym
     data, store_names = fetch_csv(ym)
     if not data:  # 診断モードは空で返る
         return
