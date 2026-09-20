@@ -223,6 +223,44 @@ def _cost_lines(page, label: str):
             _note(f"      - {m}")
 
 
+def _open_card(page, label: str, tag: str) -> bool:
+    """『label』のカードの中にある「詳細を表示」を押す。
+    ダッシュボードには同じ文言のボタンがカードの数だけあるので、
+    見えている先頭を押すと別のカード（売上）に行ってしまう。
+    目印をDOMに付けてから、その目印を押す。"""
+    try:
+        found = page.evaluate(
+            r"""(label) => {
+                document.querySelectorAll('[data-claude-target]')
+                    .forEach(e => e.removeAttribute('data-claude-target'));
+                const leaf = [...document.querySelectorAll('*')].find(
+                    el => el.children.length === 0 &&
+                          (el.textContent || '').trim() === label);
+                if (!leaf) return 'ラベルが見つからない';
+                let p = leaf.parentElement;
+                for (let i = 0; i < 10 && p; i++, p = p.parentElement) {
+                    const btn = [...p.querySelectorAll('button, a, [role=button]')]
+                        .find(b => /詳細/.test(b.textContent || ''));
+                    if (btn) { btn.setAttribute('data-claude-target', '1'); return 'ok'; }
+                }
+                return 'カード内に詳細ボタンが無い';
+            }""", label)
+        if found != "ok":
+            _note(f"[分析] 『{label}』のカードを開けない: {found}")
+            return False
+        page.locator("[data-claude-target='1']").first.click(timeout=5000)
+        page.wait_for_timeout(6000)
+        _note(f"[分析] 『{label}』の詳細を開いた → {page.url}")
+        C.diag_dump(page, f"{tag}_{label}")
+        _screen_report(page, f"分析({label})")
+        _cost_lines(page, f"分析({label})")
+        _try_csv(page, f"分析({label})", f"{tag}_{label}")
+        return True
+    except Exception as e:
+        _note(f"[分析] 『{label}』のカード操作に失敗: {type(e).__name__}: {e}")
+        return False
+
+
 def _explore_analytics(page, tag: str):
     """分析サイト（別ドメイン）を見る。ここに原価がある。
     予算登録など書き込みの画面には入らない。"""
@@ -249,6 +287,11 @@ def _explore_analytics(page, tag: str):
               f"{C.mask_numbers(' / '.join(allnames[:40]))}")
     except Exception as e:
         _note(f"[分析] 名前の列挙に失敗: {e}")
+
+    # ダッシュボードはカードが縦に並び、カードごとに「詳細を表示」がある。
+    # 素直に押すと先頭（売上）のカードに行ってしまい、FLコストに辿り着けない。
+    # FLコストのカードの中にある「詳細を表示」を名指しで押す。
+    _open_card(page, "FLコスト", tag)
 
     for name in ("詳細を表示", "View as data table, Chart"):
         if any(ng in name for ng in FORBIDDEN):
