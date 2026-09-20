@@ -362,8 +362,17 @@ def _links_with_text(page) -> list[str]:
                 for (const a of document.querySelectorAll('a[href]')) {
                     const h = a.getAttribute('href') || '';
                     if (!h || /\.(css|js|woff2?|ttf|eot|svg|png|jpg)(\?|$)/.test(h)) continue;
-                    const t = (a.innerText || a.getAttribute('aria-label')
-                               || a.getAttribute('title') || '').trim().replace(/\s+/g, ' ');
+                    // リンクの文字がaの中に無いことがある（アイコン+ラベルが
+                    // 兄弟要素）。空なら親側のテキストを拾う。
+                    let t = (a.innerText || a.getAttribute('aria-label')
+                             || a.getAttribute('title') || '').trim();
+                    if (!t) {
+                        let p = a.parentElement;
+                        for (let i = 0; i < 3 && p && !t; i++, p = p.parentElement) {
+                            t = (p.innerText || '').trim();
+                        }
+                    }
+                    t = t.replace(/\s+/g, ' ').slice(0, 40);
                     const key = t + ' → ' + h;
                     if (seen.has(key)) continue;
                     seen.add(key);
@@ -461,6 +470,28 @@ def _find_cost_export(page):
     csv_links = [t for t in seen if "CSV" in t or "ダウンロード" in t]
     if csv_links:
         _note(f"[経営管理] CSVらしきリンク {len(csv_links)}件: {' / '.join(csv_links[:10])}")
+
+    # hrefにcsv/download/exportを含むものがあれば、そこが入口。
+    # ダイニーはURL直打ちで壊れない（新Uレジとは違う）ので、hrefで辿ってよい。
+    import re as _re
+    for entry in sorted(seen):
+        href = entry.split(" → ", 1)[-1].replace(" [隠]", "")
+        if not _re.search(r"csv|download|export", href, _re.I):
+            continue
+        if _re.search(r"import|upload|regist|transaction", href, _re.I):
+            _note(f"[経営管理] {href} は書き込みの恐れがあるので開かない")
+            continue
+        try:
+            page.goto(_base() + href if href.startswith("/") else href,
+                      wait_until="domcontentloaded")
+            page.wait_for_timeout(5000)
+            _note(f"[経営管理] {href} を開いた → {C.safe_url(page.url)}")
+            C.diag_dump(page, "dinii_12_fl_export")
+            _collect_checkbox_labels(page)
+            _collect_cost_context(page, f"経営管理 {href}")
+            return True
+        except Exception as e:
+            _note(f"[経営管理] {href} を開けなかった: {type(e).__name__}")
 
     for name in ("CSVダウンロード", "CSV出力", "ダウンロード", "CSV"):
         if any(ng in name for ng in ("登録", "取込", "アップロード", "一括")):
