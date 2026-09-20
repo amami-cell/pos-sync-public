@@ -146,6 +146,82 @@ def _click_maybe_popup(page, text: str, wait_ms: int = 5000):
     return page
 
 
+# 押してはいけないもの。過去売上実績は「売上を登録する」画面で、
+# 登録 と CSV一括設定（一括取込）は**書き込み**の操作。読み取りしかしない。
+FORBIDDEN = ("登録", "CSV一括設定", "削除", "更新", "取込", "アップロード")
+
+# 落とすだけのボタン。押すとファイルが降ってくる想定。
+CSV_BUTTONS = ("CSVダウンロード", "CSV出力", "ダウンロード", "出力")
+
+
+def _try_csv(page, label: str, tag: str):
+    """CSVを落とすボタンがあれば押して、列名だけを記録する。
+    書き込み系のボタンには絶対に触らない。"""
+    names = [b for b in CSV_BUTTONS if _visible(page, b)]
+    if not names:
+        return
+    _note(f"[{label}] 落とせそうなボタン: {names}")
+    for name in names:
+        if any(ng in name for ng in FORBIDDEN):
+            _note(f"[{label}] 『{name}』は書き込みの恐れがあるので押さない")
+            continue
+        try:
+            with page.expect_download(timeout=120000) as dl:
+                page.get_by_text(name, exact=True).first.click(timeout=5000)
+            data = open(dl.value.path(), "rb").read()
+            _note(f"[{label}] 『{name}』でファイルを取得: {C.sniff_bytes(data)}")
+            try:
+                rows = C.parse_csv_bytes(data)
+                header = list(rows[0].keys()) if rows else []
+                _note(f"[{label}] CSV {len(rows)}行 / {len(header)}列")
+                _note(f"[{label}] 列名: {' | '.join(header)}")
+                cost = [h for h in header if "原価" in h or "仕入" in h or "粗利" in h]
+                _note(f"[{label}] 原価らしき列: {cost if cost else 'なし'}")
+            except Exception as e:
+                _note(f"[{label}] CSVの解析に失敗: {e}")
+            C.describe_csv(data, tag + "_dl")
+            return
+        except Exception as e:
+            _note(f"[{label}] 『{name}』では落ちてこなかった: {type(e).__name__}")
+
+
+def _cost_lines(page, label: str):
+    """原価まわりの表示を、数字を伏せて拾う。どんな粒度で持っているかを見るため。"""
+    try:
+        body = page.inner_text("body")
+    except Exception:
+        return
+    hits = [l.strip() for l in body.split("\n")
+            if any(w in l for w in ("原価", "仕入", "粗利", "FL"))]
+    if not hits:
+        _note(f"[{label}] 原価の行は見つからなかった")
+        return
+    _note(f"[{label}] 原価まわりの表示 {len(hits)}行（数字は伏せています）:")
+    seen = []
+    for l in hits:
+        m = C.mask_numbers(l)[:90]
+        if m not in seen:
+            seen.append(m)
+            _note(f"      - {m}")
+
+
+def _explore_analytics(page, tag: str):
+    """分析サイト（別ドメイン）を見る。ここに原価がある。
+    予算登録など書き込みの画面には入らない。"""
+    _note("[分析] ここは別サイト（analytics-pc.usen-regi.com）。原価はここにある")
+    _cost_lines(page, "分析")
+    for name in ("詳細を表示", "View as data table, Chart"):
+        if any(ng in name for ng in FORBIDDEN):
+            continue
+        if _click_text(page, name):
+            page.wait_for_timeout(5000)
+            _note(f"[分析] 『{name}』を押した後:")
+            _screen_report(page, f"分析({name})")
+            _cost_lines(page, f"分析({name})")
+            C.diag_dump(page, f"{tag}_{'detail' if '詳細' in name else 'table'}")
+            _try_csv(page, f"分析({name})", f"{tag}_{'detail' if '詳細' in name else 'table'}")
+
+
 def _explore_menu(page, parent: str | None, child: str, tag: str):
     """メニューをクリックして画面を開き、中身をまとめメモに残す。"""
     if _on_login_page(page):
@@ -180,6 +256,9 @@ def _explore_menu(page, parent: str | None, child: str, tag: str):
             _note(f"[{child}] 検索を押した後:")
             _screen_report(target, child + "(検索後)")
             C.diag_dump(target, tag + "_searched")
+        _try_csv(target, child, tag)
+        if "analytics" in (target.url or ""):
+            _explore_analytics(target, tag)
         if target is not page:
             target.close()
     except Exception as e:
