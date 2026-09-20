@@ -28,40 +28,117 @@ def _base() -> str:
 
 # OTP突破後に見えたメニュー（run #12）。売上CSVの出口を探す候補。
 #   売上管理 → 伝票明細 / 収入印紙 / 過去売上実績
-#   分析  … 売上・原価・客数の集計はここの可能性が高い
-EXPLORE_PATHS = [
-    ("/cms/side-menu/analysis-system", "uleji_10_analysis"),
-    ("/cms/side-menu/slip-list", "uleji_11_slip"),
-    ("/cms/side-menu/past-sales-regist", "uleji_12_past_sales"),
+#   分析  … ダッシュボード。売上・客数はここにある
+#
+# run #13 で分かったこと: **URLを直接叩いてはいけない**。
+#   /cms/side-menu/slip-list      → 「予期せぬエラーが発生しました。再ログインを」
+#   /cms/side-menu/past-sales-regist → ログイン画面に戻された（セッションが切れた）
+# side-menu配下は画面遷移の途中状態を前提にしているらしく、goto だと壊れる。
+# 人と同じようにメニューを「クリック」して開く。
+MENU = [
+    (None, "分析", "uleji_10_analysis"),
+    ("売上管理", "伝票明細", "uleji_11_slip"),
+    ("売上管理", "過去売上実績", "uleji_12_past_sales"),
 ]
 
+KEYWORDS = ("原価", "売上", "客数", "来客", "食材", "粗利", "仕入",
+            "CSV", "ダウンロード", "出力", "エクスポート", "期間", "月次")
 
-def _explore(page, path: str, tag: str):
-    """指定パスを開いて構造を出す。CSVの出口と期間指定の場所を特定するため。
-    数字は伏せる（このリポジトリは公開のため）。"""
+
+def _on_login_page(page) -> bool:
+    """ログイン画面に戻されていないか。戻されていたら探索は続けられない。"""
     try:
-        page.goto(_base() + path, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
-        print(f"[uleji][探索] {path} → 実際のURL {page.url}")
+        return page.locator("#companyCode").count() > 0 and \
+            page.locator("#companyCode").first.is_visible()
+    except Exception:
+        return False
+
+
+def _frame_texts(page) -> list[tuple[str, str]]:
+    """本体と全フレームの本文。画面がiframeの中にあると本体だけ見ても空振りする。"""
+    out = []
+    for fr in page.frames:
+        try:
+            out.append((fr.url or "(main)", fr.inner_text("body")))
+        except Exception:
+            continue
+    return out
+
+
+def _screen_report(page, label: str):
+    """画面の中身をまとめメモに残す。数字は伏せる（公開リポジトリのため）。"""
+    _note(f"[{label}] URL {page.url}")
+    texts = _frame_texts(page)
+    if len(texts) > 1:
+        _note(f"[{label}] フレーム {len(texts)}個（中身は別フレームにある）")
+    for url, body in texts:
+        hits = [w for w in KEYWORDS if w in body]
+        if not body.strip():
+            continue
+        where = "" if len(texts) == 1 else f" ＠{url[:60]}"
+        _note(f"[{label}] 出てくる語{where}: {hits if hits else 'なし'}")
+        lines = [l.strip() for l in body.split("\n") if l.strip()]
+        for l in lines[:14]:
+            _note(f"      - {C.mask_numbers(l)[:90]}")
+    # 押せるもの（CSV出力はアイコンだけのこともある）
+    try:
+        btns = page.evaluate(
+            r"""() => [...document.querySelectorAll('button, a, input[type=button], input[type=submit]')]
+                .filter(el => el.offsetParent !== null)
+                .map(el => ((el.innerText || el.value || el.getAttribute('aria-label')
+                             || el.getAttribute('title') || '').trim()
+                            .replace(/\s+/g, ' ')).slice(0, 40))
+                .filter(Boolean)""")
+        uniq = []
+        for b in btns:
+            if b not in uniq:
+                uniq.append(b)
+        _note(f"[{label}] 押せるもの {len(uniq)}件: {C.mask_numbers(' / '.join(uniq[:25]))}")
+    except Exception as e:
+        _note(f"[{label}] ボタンの列挙に失敗: {e}")
+
+
+def _click_text(page, text: str) -> bool:
+    """画面に見えている文字をクリックする。メニューはリンクにもボタンにも見えるので、
+    役割を決め打ちせず、見えている最初の一致を押す。"""
+    for make in (lambda: page.get_by_role("link", name=text, exact=True),
+                 lambda: page.get_by_role("button", name=text, exact=True),
+                 lambda: page.get_by_text(text, exact=True)):
+        try:
+            loc = make()
+            for i in range(min(loc.count(), 3)):
+                if loc.nth(i).is_visible():
+                    loc.nth(i).click()
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def _explore_menu(page, parent: str | None, child: str, tag: str):
+    """メニューをクリックして画面を開き、中身をまとめメモに残す。"""
+    if _on_login_page(page):
+        _note(f"[{child}] ログイン画面に戻されているため調査できず")
+        return
+    try:
+        if parent and not _click_text(page, parent):
+            _note(f"[{child}] 親メニュー『{parent}』が押せなかった")
+            return
+        if parent:
+            page.wait_for_timeout(1000)
+        if not _click_text(page, child):
+            _note(f"[{child}] メニューが押せなかった")
+            return
+        page.wait_for_timeout(5000)
         C.diag_dump(page, tag)
-        for word in ("CSV", "ダウンロード", "エクスポート", "出力", "検索"):
+        _screen_report(page, child)
+        for word in ("CSV", "ダウンロード", "出力"):
             C.probe_elements(page, word, limit=3)
         C.probe_icon_buttons(page)
-        C.probe_form_state(page)
-        try:
-            body = page.inner_text("body")
-            hits = [w for w in ("原価", "売上", "客数", "来客", "食材", "粗利",
-                                "CSV", "ダウンロード", "出力", "期間")
-                    if w in body]
-            _note(f"[{path}] 画面に出てくる語: {hits if hits else 'なし'}")
-            lines = [l.strip() for l in body.split("\n") if l.strip()]
-            _note(f"[{path}] 画面の行（先頭12行・数字は伏せています）:")
-            for l in lines[:12]:
-                _note(f"      - {C.mask_numbers(l)[:90]}")
-        except Exception:
-            pass
+        if _on_login_page(page):
+            _note(f"[{child}] この画面を開いた直後にログイン画面へ戻された")
     except Exception as e:
-        _note(f"[{path}] 調査に失敗: {e}")
+        _note(f"[{child}] 調査に失敗: {e}")
 
 
 def _submit_otp(page) -> bool:
@@ -187,8 +264,8 @@ def fetch_csv(ym: str) -> bytes:
                     _note("認証コードの自動入力に成功。管理画面に入れている")
                     C.probe_elements(page, "CSV")
                     C.probe_elements(page, "ダウンロード")
-                    for path, tag in EXPLORE_PATHS:
-                        _explore(page, path, tag)
+                    for parent, child, tag in MENU:
+                        _explore_menu(page, parent, child, tag)
                 except Exception as e:
                     print(f"[uleji][diag] OTP突破に失敗: {e}")
                     _note(f"OTP突破に失敗: {e}")
