@@ -205,6 +205,55 @@ def _try_csv(page, label: str, tag: str):
             _note(f"[{label}] 『{name}』では落ちてこなかった: {type(e).__name__}")
 
 
+def _period_probe(page, label: str):
+    """期間（年月）を指定する部品の正体を暴く。損益PL集計のCSVは
+    **画面の期間ぶん1行しか落ちない**ので、月を指定できないと当月しか取れない。
+
+    過去売上実績の側は `#designatedYear` / `#designatedMonth` という素の select
+    だったが、分析サイトは別実装（Vue）で、前回の棚卸しでは input も select も
+    0件だった。日付ピッカーが div で出来ている可能性が高い。
+    セレクタを当てずっぽうで書くと「押せたつもりで当月のまま」になるので、
+    ここで正体を出してから実装する。
+
+    ※年月そのものは秘密ではないので伏せない（伏せると何も分からなくなる）。
+    値の入っている input の value だけは出さない（認証情報が入りうる）。"""
+    try:
+        info = page.evaluate(
+            r"""() => {
+                const cut = s => (s || '').toString().trim().replace(/\s+/g, ' ').slice(0, 60);
+                const fields = [...document.querySelectorAll('input,select,textarea')].map(el => {
+                    const opts = el.tagName === 'SELECT'
+                        ? [...el.options].slice(0, 16).map(o => cut(o.text)).join(',') : '';
+                    return [el.tagName.toLowerCase(), el.getAttribute('type') || '',
+                            el.getAttribute('name') || '', el.getAttribute('id') || '',
+                            cut(el.getAttribute('placeholder')), cut(el.className), opts].join('\t');
+                });
+                // 日付ピッカーが div で出来ている場合に備えて、それらしい器も拾う
+                const picky = [...document.querySelectorAll(
+                    '[class*=picker],[class*=date],[class*=calendar],[class*=month],[class*=period],[role=combobox]')]
+                    .map(el => el.tagName.toLowerCase() + '\t' + cut(el.className)
+                               + '\t' + cut(el.childElementCount === 0 ? el.textContent : ''));
+                // 画面に出ている「2026/09」「2026年9月」風の表示（＝いま何月を見ているか）
+                const shown = [...new Set((document.body.innerText || '').split('\n')
+                    .map(cut)
+                    .filter(t => /\d{4}\s*[/年-]\s*\d{1,2}/.test(t)))].slice(0, 12);
+                return { fields: [...new Set(fields)], picky: [...new Set(picky)].slice(0, 25), shown };
+            }""")
+    except Exception as e:
+        _note(f"[{label}] 期間の部品を調べられなかった: {type(e).__name__}: {e}")
+        return
+    _note(f"[{label}] 期間の部品しらべ（{C.safe_url(page.url)}）")
+    _note(f"      入力欄 {len(info['fields'])}件:")
+    for f in info["fields"][:20]:
+        _note(f"      - {f}")
+    _note(f"      ピッカーらしき器 {len(info['picky'])}件:")
+    for f in info["picky"][:20]:
+        _note(f"      - {f}")
+    _note(f"      画面に出ている年月 {len(info['shown'])}件: {' / '.join(info['shown'])}")
+    if not info["fields"] and not info["picky"]:
+        _note(f"      → 期間の部品が1つも無い。この画面は月を選べない可能性がある")
+
+
 def _cost_lines(page, label: str):
     """原価まわりの表示を、数字を伏せて拾う。どんな粒度で持っているかを見るため。"""
     try:
@@ -256,6 +305,7 @@ def _open_card(page, label: str, tag: str) -> bool:
         C.diag_dump(page, f"{tag}_{label}")
         _screen_report(page, f"分析({label})")
         _cost_lines(page, f"分析({label})")
+        _period_probe(page, f"分析({label})")
         _try_csv(page, f"分析({label})", f"{tag}_{label}")
         return True
     except Exception as e:
@@ -303,6 +353,7 @@ def _explore_analytics(page, tag: str):
             _note(f"[分析] 『{name}』を押した後:")
             _screen_report(page, f"分析({name})")
             _cost_lines(page, f"分析({name})")
+            _period_probe(page, f"分析({name})")
             C.diag_dump(page, f"{tag}_{'detail' if '詳細' in name else 'table'}")
             _try_csv(page, f"分析({name})", f"{tag}_{'detail' if '詳細' in name else 'table'}")
 
