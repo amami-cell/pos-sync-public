@@ -360,6 +360,30 @@ def safe_url(url: str) -> str:
     return head + ("?…(省略)" if len(head) < len(url) else "")
 
 
+def url_query_shape(url: str) -> str:
+    """URLのクエリを「鍵＝値」で出す。ただし**値は安全なものだけ**。
+
+    `safe_url()` はクエリを丸ごと落とす。認証トークンを公開ログに出さないため
+    で、それは正しい。ただし期間や店舗コードがクエリに乗っている画面では、
+    落としてしまうと「URLで月を指定できるか」が永久に分からない。
+
+    そこで鍵の名前は必ず出し、値は
+      - 日付・数字・短い英数（16文字以下）… そのまま出す
+      - それ以外（長い/記号を含む＝トークンの疑い）… 伏せる
+    とする。**判断に迷う形は伏せる側に倒す。**
+    """
+    import re
+    from urllib.parse import parse_qsl, urlsplit
+
+    if not url or "?" not in url:
+        return "(クエリなし)"
+    safe = re.compile(r"^[0-9A-Za-z_\-./:年月日]{0,16}$")
+    out = []
+    for key, value in parse_qsl(urlsplit(url).query, keep_blank_values=True):
+        out.append(f"{key}={value}" if safe.match(value or "") else f"{key}=…(伏せた)")
+    return " & ".join(out) if out else "(クエリなし)"
+
+
 def mask_numbers(text: str) -> str:
     """数字を伏せる。公開リポジトリのログに売上・原価の実数を残さないため。
     項目名や画面の構造だけが残る。"""

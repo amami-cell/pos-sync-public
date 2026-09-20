@@ -218,16 +218,116 @@ def _month_range_label(ym: str) -> tuple[str, str]:
     return f"{year}年{month:02d}月01日", f"{year}年{month:02d}月{last:02d}日"
 
 
+_DATE_FORMS = (
+    ("%Y-%m-%d", r"^\d{4}-\d{2}-\d{2}$"),
+    ("%Y/%m/%d", r"^\d{4}/\d{2}/\d{2}$"),
+    ("%Y%m%d",   r"^\d{8}$"),
+    ("%Y年%m月%d日", r"^\d{4}年\d{2}月\d{2}日$"),
+    ("%Y-%m",    r"^\d{4}-\d{2}$"),
+    ("%Y%m",     r"^\d{6}$"),
+)
+
+
+def _date_form(value: str) -> str | None:
+    """クエリの値が日付なら、その書式を返す。違えば None。"""
+    import re
+    for fmt, pat in _DATE_FORMS:
+        if re.match(pat, value or ""):
+            return fmt
+    return None
+
+
+def _try_pl_period_by_url(page, ym: str) -> bool:
+    """期間がURLのクエリに乗っていれば、そこを書き換えて開き直す。
+
+    ピッカーを操作するより確実で、壊れ方も分かりやすい。
+    **ただし必ず開いた後に画面を読み直して確かめる。**
+
+    分析サイトはSSOで入っているので、同じパスのクエリだけを差し替える
+    （別パスへ飛ぶとセッションを落とす恐れがある）。ログイン画面に
+    戻されたら、その旨を出して諦める。"""
+    import datetime
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    parts = urlsplit(page.url or "")
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    dated = [(i, k, v, _date_form(v)) for i, (k, v) in enumerate(pairs) if _date_form(v)]
+    if not dated:
+        _note("[PL期間] URLのクエリに日付らしい値は無い")
+        return False
+    _note(f"[PL期間] URLのクエリ: {C.url_query_shape(page.url)}")
+    _note(f"[PL期間] 日付らしい鍵: {[k for _, k, _, _ in dated]}")
+
+    year, month = (int(x) for x in ym.split("-"))
+    last = _calendar.monthrange(year, month)[1]
+    first_d = datetime.date(year, month, 1)
+    last_d = datetime.date(year, month, last)
+    # 2つあれば「開始・終了」とみなす。1つなら月そのものの指定とみなす。
+    new_pairs = list(pairs)
+    for n, (i, k, _v, fmt) in enumerate(dated):
+        use = first_d if (len(dated) == 1 or n == 0) else last_d
+        new_pairs[i] = (k, use.strftime(fmt))
+    target = urlunsplit((parts.scheme, parts.netloc, parts.path,
+                         urlencode(new_pairs), parts.fragment))
+    _note(f"[PL期間] URLを書き換えて開き直す: {C.url_query_shape(target)}")
+    try:
+        page.goto(target, wait_until="networkidle", timeout=40000)
+    except Exception as e:
+        _note(f"[PL期間] 開き直せなかった: {type(e).__name__}: {e}")
+        return False
+    page.wait_for_timeout(4000)
+    if _on_login_page(page):
+        _note("[PL期間] URL直打ちでログイン画面に戻された。この経路は使えない")
+        return False
+    return _period_matches(page, ym)
+
+
+def _period_matches(page, ym: str) -> bool:
+    """画面がほんとうに対象月になったかを読み直して確かめる。
+
+    **ここを省くと「合わせたつもりで当月のまま」になり、どの月を指定しても
+    同じ数字が入る**という、いちばん気づきにくい壊れ方をする。"""
+    start, end = _month_range_label(ym)
+    try:
+        shown = page.evaluate(
+            r"""() => [...new Set((document.body.innerText || '').split('\n')
+                .map(t => t.trim())
+                .filter(t => /\d{4}年\d{2}月\d{2}日/.test(t)))].slice(0, 8)""")
+    except Exception as e:
+        _note(f"[PL期間] 画面を読み直せなかった: {type(e).__name__}: {e}")
+        return False
+    if any(start in v for v in shown) and any(end in v for v in shown):
+        _note(f"[PL期間] {ym} に合った（画面: {' / '.join(shown)}）")
+        return True
+    _note(f"[PL期間] 合っていない。期待 {start}-{end} / 画面 {' / '.join(shown)}")
+    return False
+
+
 def _select_pl_period(page, ym: str) -> bool:
     """損益PL集計の期間を対象月（月初〜月末）に合わせる。合ったかを返す。
 
-    この画面は Vuetify（`v-field`）で、期間は**1つのテキスト入力**に
-    `2026年09月20日-2026年09月20日` の形で入っている。id は `input-64` のような
-    **自動採番で毎回変わる**ので、idでは掴めない。値の形（YYYY年MM月DD日）で探す。
+    CSVは**画面に出ている期間ぶん1行**しか落ちず、既定は「今日-今日」。
+    ここを合わせられないと当月しか取れない。
 
-    **必ず入れ直したあとに画面を読み直して確かめる。** ここを省くと
-    「合わせたつもりで当月のまま」になり、どの月を指定しても同じ数字が入る
-    という、いちばん気づきにくい壊れ方をする。"""
+    確実な順に3つ試す。
+
+    1. **URLのクエリを書き換える。** 期間が乗っているならこれがいちばん確実で、
+       壊れたときも読んで分かる
+    2. **値の形（YYYY年MM月DD日）で入力欄を探して入れる。** ただし実測では
+       画面の `2026年09月20日-2026年09月20日` は `<input>` ではなく
+       Vuetify の `v-field` の中のテキストで、唯一の input は空だった
+    3. どちらも駄目なら**ピッカーを開いて中身を出す**（次の実装のため）
+
+    id は `input-64` のような**自動採番で毎回変わる**ので、idでは掴まない。
+
+    **どの経路でも、最後に画面を読み直して確かめる（`_period_matches`）。**
+    ここを省くと「合わせたつもりで当月のまま」になり、どの月を指定しても
+    同じ数字が入るという、いちばん気づきにくい壊れ方をする。"""
+    # ① URLのクエリに期間が乗っていれば、そこを書き換えるのがいちばん確実
+    if _try_pl_period_by_url(page, ym):
+        return True
+
+    # ② 値の形（YYYY年MM月DD日）で入力欄を探して入れる
     start, end = _month_range_label(ym)
     want = f"{start}-{end}"
     try:
@@ -271,19 +371,11 @@ def _select_pl_period(page, ym: str) -> bool:
     page.wait_for_timeout(4000)
 
     # ---- 確認: 画面がほんとうに対象月になったか ----
-    try:
-        shown = page.evaluate(
-            r"""() => [...document.querySelectorAll('input')]
-                .map(i => i.value || '')
-                .filter(v => /\d{4}年\d{2}月\d{2}日/.test(v))""")
-    except Exception as e:
-        _note(f"[PL期間] 画面を読み直せなかった: {type(e).__name__}: {e}")
-        return False
-    if any(want in v for v in shown):
-        _note(f"[PL期間] {ym} に合わせた（{want}）")
+    if _period_matches(page, ym):
         return True
-    _note(f"[PL期間] **合わせられなかった。** 期待 {want} / 画面 {shown}")
     _note("[PL期間] このまま落とすと当月のCSVを対象月として取り込むので、中止する")
+    # ③ どちらも駄目ならピッカーを開いて中身を出す（次の実装のため）
+    _open_period_picker(page)
     return False
 
 
