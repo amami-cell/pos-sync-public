@@ -622,11 +622,15 @@ def _try_custom_range(page, ym: str) -> bool:
     """
     start, end = _month_range_label(ym)
     _note(f"[PL期間] 「期間を指定」で {start}〜{end} に合わせる")
-    for i, (how, fn) in enumerate(
-            (("入力欄", _fill_range_inputs), ("カレンダー", _calendar_pick))):
-        # ⚠️ **確定を押すとピッカーが閉じる。** 閉じたまま次の形を試すと
-        # 必ず空振りするので、開いていなければ開き直す。
-        if i and not _reopen_custom_range(page):
+    shapes = (
+        ("日付の入った欄", lambda p, y: _fill_range_inputs(p, y)),
+        ("空の欄・年月日", lambda p, y: _fill_bare_input(p, y, "ja")),
+        ("空の欄・スラッシュ", lambda p, y: _fill_bare_input(p, y, "slash")),
+        ("空の欄・ハイフン", lambda p, y: _fill_bare_input(p, y, "iso")),
+        ("カレンダー", _calendar_pick),
+    )
+    for i, (how, fn) in enumerate(shapes):
+        if i and not _ensure_custom_range_open(page):
             break
         if not fn(page, ym):
             continue
@@ -640,23 +644,141 @@ def _try_custom_range(page, ym: str) -> bool:
     return False
 
 
-def _reopen_custom_range(page) -> bool:
-    """「期間を指定」を開き直す。開けたかを返す。
+def _custom_range_open(page) -> bool:
+    """「期間を指定」の画面が開いたままかを見る。
 
-    確定ボタンを押すとピッカーは閉じる。閉じたまま次の形を試すと必ず
-    空振りするので、次を試す前に開き直す。
-
-    **開いているかを当てにいかない。** この画面は元から `v-overlay` を
-    いくつも持っている（左メニュー、全店舗/グループ/1店舗の切替）ので、
-    「開いているか」の判定自体が一度失敗している。いったん Escape で
-    閉じてから開き直すほうが確実。"""
-    _note("[PL期間] 次の形を試すため、いったん閉じて開き直す")
+    決め手は **キャンセル / OK のボタン**。実測（2026-09-21）では
+    「期間を指定」を押すと、プリセットの一覧はそのままに
+    `キャンセル | OK` が現れる。これがあれば開いている。"""
     try:
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(800)
+        return bool(page.evaluate(
+            r"""(sel) => {
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const ov = [...document.querySelectorAll(sel)].filter(vis);
+                return ov.some(o => [...o.querySelectorAll('button, [role=button], .v-btn')]
+                    .filter(vis)
+                    .some(b => ['OK', 'キャンセル'].includes((b.innerText || '').trim())));
+            }""", _OVERLAY_SEL))
     except Exception:
-        pass
+        return False
+
+
+def _ensure_custom_range_open(page) -> bool:
+    """「期間を指定」が開いていなければ開き直す。開いていればそのまま。
+
+    ⚠️ **開いているものを閉じにいかない。** 2026-09-21 の実測で、次の形を
+    試す前に Escape を押して開き直そうとしたところ、
+    **ダイアログは Escape で閉じず、その覆いが `v-field` を隠していた**ため
+    開き直しがタイムアウトし、**2つ目の形（カレンダー）を一度も試せなかった**。
+
+      [PL期間] 次の形を試すため、いったん閉じて開き直す
+      [PL期間] 追加アイコンを押せなかった: TimeoutError
+      [PL期間] v-field 本体を押せなかった: TimeoutError
+      [PL期間] メニューが開かなかった
+
+    開いたまま次の形を試すのが正しい。閉じているときだけ開き直す。"""
+    if _custom_range_open(page):
+        return True
+    _note("[PL期間] 「期間を指定」が閉じているので開き直す")
     return _open_period_menu(page) and _click_menu_item(page, "期間を指定")
+
+
+# 「期間を指定」の欄に入れてみる書式。**どれが正かは実機で未確定**なので
+# 順に試して、そのつど画面を読んで確かめる。
+RANGE_STYLES = {
+    "ja":    ("{y}年{m:02d}月{d:02d}日", "-"),
+    "slash": ("{y}/{m:02d}/{d:02d}", "-"),
+    "iso":   ("{y}-{m:02d}-{d:02d}", " - "),
+}
+
+
+def _range_text(ym: str, style: str) -> tuple[str, str, str]:
+    """(開始, 終了, 範囲まとめ) を指定の書式で作る。"""
+    fmt, joiner = RANGE_STYLES[style]
+    year, month = (int(x) for x in ym.split("-"))
+    last = _calendar.monthrange(year, month)[1]
+    a = fmt.format(y=year, m=month, d=1)
+    b = fmt.format(y=year, m=month, d=last)
+    return a, b, f"{a}{joiner}{b}"
+
+
+def _fill_bare_input(page, ym: str, style: str) -> bool:
+    """**空の入力欄**に期間を打ち込む。入れたかを返す。
+
+    ⚠️ **空だからといって飛ばさない。** 実測（2026-09-21）では
+    「期間を指定」の画面に見えている入力欄はちょうど1つで、
+    **値も placeholder も空・readonly でもない**（`input-64 / text`）。
+    `_fill_range_inputs` は「日付らしい値か placeholder がある欄」しか
+    拾わないので、**この欄を素通りしていた**。期間を指定しているのだから、
+    空の欄こそ打ち込む先である。
+
+    書式は実機で未確定なので、呼び出し側が年月日／スラッシュ／ハイフンを
+    順に試す。**打ったあとに欄が増えるか**も見る（開始を入れると終了欄が
+    現れる作りがあるため）。
+
+    JSのsetterではなく Playwright の fill を使う。Vuetify の欄は
+    本物のキー入力でないと反応しないことがある。"""
+    a, b, whole = _range_text(ym, style)
+    try:
+        n = page.evaluate(
+            r"""() => {
+                document.querySelectorAll('[data-claude-bare]')
+                    .forEach(e => e.removeAttribute('data-claude-bare'));
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const skip = ['hidden', 'checkbox', 'radio', 'submit', 'button'];
+                const all = [...document.querySelectorAll('input')]
+                    .filter(vis)
+                    .filter(i => !skip.includes(i.type))
+                    .filter(i => !(i.readOnly || i.getAttribute('readonly') !== null));
+                all.forEach((el, i) => el.setAttribute('data-claude-bare', String(i + 1)));
+                return all.length;
+            }""")
+    except Exception as e:
+        _note(f"[PL期間] 入力欄を探せなかった: {type(e).__name__}: {e}")
+        return False
+    if not n:
+        _note("[PL期間] 打ち込める入力欄が無い")
+        return False
+
+    def put(idx: int, text: str) -> bool:
+        try:
+            page.locator(f"[data-claude-bare='{idx}']").first.fill(text, timeout=5000)
+            page.wait_for_timeout(1200)
+            return True
+        except Exception as e:
+            _note(f"[PL期間] {idx}番目の欄に入れられなかった: {type(e).__name__}")
+            return False
+
+    if n >= 2:
+        _note(f"[PL期間] 打ち込める欄が {n}件。先頭2つに開始・終了を入れる（{style}）")
+        return put(1, a) and put(2, b)
+
+    # 1件だけ。まず範囲をまとめて入れてみる
+    _note(f"[PL期間] 空の欄に範囲をまとめて入れる（{style}）: {whole}")
+    if not put(1, whole):
+        return False
+    # 開始を入れると終了欄が現れる作りかもしれない。増えていたら入れる
+    try:
+        after = page.evaluate(
+            r"""() => {
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const skip = ['hidden', 'checkbox', 'radio', 'submit', 'button'];
+                const all = [...document.querySelectorAll('input')]
+                    .filter(vis).filter(i => !skip.includes(i.type))
+                    .filter(i => !(i.readOnly || i.getAttribute('readonly') !== null));
+                all.forEach((el, i) => el.setAttribute('data-claude-bare', String(i + 1)));
+                return all.length;
+            }""")
+    except Exception:
+        after = 1
+    if after > 1:
+        _note(f"[PL期間] 打ったあと欄が {after}件に増えた。開始・終了として入れ直す")
+        put(1, a)
+        put(2, b)
+    return True
 
 
 def _fill_range_inputs(page, ym: str) -> bool:
@@ -937,7 +1059,12 @@ def _dump_open_picker(page):
                 const inputs = [...document.querySelectorAll('input')].map(i =>
                     [i.getAttribute('id') || '', i.getAttribute('type') || '',
                      /\d{4}年\d{2}月\d{2}日/.test(i.value || '') ? 'date値あり' : '',
-                     (i.readOnly || i.getAttribute('readonly') !== null) ? 'readonly' : ''
+                     (i.readOnly || i.getAttribute('readonly') !== null) ? 'readonly' : '',
+                     // 値は出さない（認証情報が入りうる）が、素性は出す。
+                     // 空の欄がどれなのかが分からないと、打ち込む先を決められない。
+                     cut(i.getAttribute('aria-label')), cut(i.getAttribute('name')),
+                     cut(i.getAttribute('placeholder')), cut(i.className),
+                     (i.value || '') ? '値あり' : '空'
                     ].join('\t'));
                 // カレンダーかどうかの決め手
                 const cal = !!document.querySelector(
@@ -952,6 +1079,57 @@ def _dump_open_picker(page):
     _note(f"[PL期間] 入力欄 {len(info['inputs'])}件:")
     for line in info["inputs"][:12]:
         _note(f"      - {line}")
+    _dump_open_picker_text(page)
+
+
+def _dump_open_picker_text(page):
+    """開いている器の**文字そのもの**と、日付らしい文字を持つ要素を出す。
+
+    ⚠️ **押せるものの一覧だけでは形が分からなかった。** 2026-09-21 の実測で
+    出たのは `今日 | 昨日 | … | 先月 | キャンセル | OK` で、
+    **肝心の「日付をどこに入れるのか」が見えなかった**。
+    見出しや `開始日 / 終了日` のような札は button でも input でもないので、
+    器の文字そのものを読まないと分からない。
+
+    ※年月日は秘密ではないので伏せない。伏せると何も分からなくなる。
+      input の value だけは出さない（認証情報が入りうる）。"""
+    try:
+        info = page.evaluate(
+            r"""(sel) => {
+                const cut = s => (s || '').toString().trim()
+                    .replace(/\s+/g, ' ').slice(0, 60);
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const ov = [...document.querySelectorAll(sel)].filter(vis);
+                // 器ごとの文字（行単位）
+                const lines = [];
+                for (const o of ov)
+                    (o.innerText || '').split('
+').map(cut).filter(Boolean)
+                        .forEach(t => lines.push(t));
+                // 日付らしい文字を持ち、かつ子を持たない要素（＝札や表示欄）
+                const re = /\d{4}\s*[年\/-]\s*\d{1,2}|\d{1,2}\s*月|開始|終了|から|まで/;
+                const marks = [];
+                for (const o of ov)
+                    for (const el of o.querySelectorAll('*')) {
+                        if (el.children.length) continue;
+                        const t = cut(el.textContent);
+                        if (t && re.test(t))
+                            marks.push(el.tagName.toLowerCase() + '	'
+                                       + cut(el.className) + '	' + t);
+                    }
+                return { lines: [...new Set(lines)].slice(0, 40),
+                         marks: [...new Set(marks)].slice(0, 20) };
+            }""", _OVERLAY_SEL)
+    except Exception as e:
+        _note(f"[PL期間] 中の文字を読めなかった: {type(e).__name__}: {e}")
+        return
+    _note(f"[PL期間] 中の文字 {len(info['lines'])}行:")
+    for t in info["lines"]:
+        _note(f"      | {t}")
+    _note(f"[PL期間] 日付・開始終了らしき札 {len(info['marks'])}件:")
+    for t in info["marks"]:
+        _note(f"      * {t}")
 
 
 def _period_probe(page, label: str):
