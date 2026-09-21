@@ -26,6 +26,59 @@ def last_month(ym: str | None = None) -> str:
     t = datetime.date.today().replace(day=1) - datetime.timedelta(days=1)
     return f"{t.year:04d}-{t.month:02d}"
 
+# 埋め戻しで一度に回す上限。ログインは1回なので、長すぎるとセッションが先に切れる。
+MAX_BACKFILL_MONTHS = 24
+
+
+def parse_months(spec: str | None) -> list[str]:
+    """対象月の指定を月の並びにする。埋め戻し（バックフィル）の入口。
+
+      None / ""          → 先月ひとつ
+      "2026-08"          → ["2026-08"]
+      "2026-05:2026-08"  → 05,06,07,08（**両端を含む**）
+      "2026-05,2026-08"  → その2つだけ
+
+    ⚠️ **形の違う指定を黙って受け取らない。** ここは「どの月を本番シートに
+    書くか」を決める入口で、取り違えると**別の月の数字が対象月として入る**。
+    月の書式・順序・件数のどれかが怪しければ、その場で止める。
+    """
+    import re as _re
+    if not spec or not str(spec).strip():
+        return [last_month(None)]
+    text = str(spec).strip()
+
+    def one(v: str) -> str:
+        v = v.strip()
+        if not _re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])", v):
+            raise ValueError(f"対象月は YYYY-MM で指定してください: {v!r}")
+        return v
+
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"範囲は 開始:終了 の形で指定してください: {text!r}")
+        a, b = one(parts[0]), one(parts[1])
+        if a > b:
+            # 逆に書くと0件になって「何も取れなかった」と紛らわしい。
+            raise ValueError(f"範囲が逆です（開始 {a} が終了 {b} より後）")
+        out, y, m = [], int(a[:4]), int(a[5:7])
+        while f"{y:04d}-{m:02d}" <= b:
+            out.append(f"{y:04d}-{m:02d}")
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    else:
+        out = [one(v) for v in text.split(",") if v.strip()]
+        if not out:
+            raise ValueError(f"対象月が読み取れません: {text!r}")
+        # 並べ替えと重複除去。同じ月を2回まわしてもシートを2度書き換えるだけ。
+        out = sorted(set(out))
+
+    if len(out) > MAX_BACKFILL_MONTHS:
+        raise ValueError(
+            f"一度に指定できるのは {MAX_BACKFILL_MONTHS}か月までです（{len(out)}か月）。"
+            "ログインは1回なので、長すぎると途中でセッションが切れます")
+    return out
+
+
 def norm_name(s: str) -> str:
     """全角/半角・空白ゆらぎを吸収して店舗名照合しやすくする。"""
     return unicodedata.normalize("NFKC", str(s)).replace(" ", "").replace("　", "").strip()
@@ -187,10 +240,15 @@ def write_to_sheet(rows: list[dict], spreadsheet_id: str, worksheet: str = "POS�
     existing = ws.get_all_records()
     keep = [r for r in existing
             if not any(r.get("年月")==x["年月"] and norm_name(r.get("店舗名",""))==norm_name(x["店舗名"]) and r.get("POS")==x["POS"] for x in rows)]
-    ws.clear(); ws.append_row(COLUMNS)
-    for r in keep + rows:
-        ws.append_row([r.get(c, "") for c in COLUMNS])
-    print(f"[write_to_sheet] {len(rows)}行 追記 / 既存{len(keep)}行 保持 -> {worksheet}")
+    # ⚠️ **1行ずつ append_row しない。** Sheets の書き込みは 1分/60回 で
+    # 打ち止めになる。1か月ぶん（数行）なら足りるが、**埋め戻しで数百行に
+    # なると途中で撥ねられ、シートが消えたまま（clear 済み）で止まる。**
+    # clear と書き戻しをそれぞれ1回にする。
+    values = [COLUMNS] + [[r.get(c, "") for c in COLUMNS] for r in keep + rows]
+    ws.clear()
+    ws.update(values=values, range_name="A1")
+    print(f"[write_to_sheet] {len(rows)}行 追記 / 既存{len(keep)}行 保持 "
+          f"/ 計{len(values) - 1}行を1回で書き戻し -> {worksheet}")
 
 def now_str() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")

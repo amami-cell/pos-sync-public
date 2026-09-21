@@ -223,6 +223,72 @@ def _month_range_label(ym: str) -> tuple[str, str]:
     return f"{year}年{month:02d}月01日", f"{year}年{month:02d}月{last:02d}日"
 
 
+def _month_range_iso(ym: str) -> tuple[str, str]:
+    """'2026-08' → ('2026-08-01', '2026-08-31')。
+
+    `<input type=date>` は **`YYYY-MM-DD` しか受け取らない**（日本語表記を
+    入れても黙って無視され、欄が空のまま＝当月のCSVが落ちる）。
+    画面表記用の `_month_range_label` と使い分ける。"""
+    year, month = (int(x) for x in ym.split("-"))
+    last = _calendar.monthrange(year, month)[1]
+    return f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last:02d}"
+
+
+def month_steps(shown: str, want: str) -> int:
+    """カレンダーを何回送れば対象月に着くか。正なら次へ、負なら前へ。
+
+    **今日から逆算しない。** 実行しているランナーはUTC、画面はJSTなので、
+    月初の数時間は両者の「今月」がずれる。見出しを読んで差を取る。"""
+    a = int(shown[:4]) * 12 + int(shown[5:7])
+    b = int(want[:4]) * 12 + int(want[5:7])
+    return b - a
+
+
+# カレンダーを送る回数の上限。見出しを読み違えたときに、押し続けないための歯止め。
+MAX_MONTH_STEPS = 36
+
+_EN_MONTHS = ("january", "february", "march", "april", "may", "june", "july",
+              "august", "september", "october", "november", "december")
+
+
+def parse_month_header(text: str | None) -> str | None:
+    """カレンダーの見出しから年月を読む。'2026年9月' → '2026-09'。読めなければ None。
+
+    ⚠️ **日まで入っている文字を年月と読まない。** この画面には
+    `2026年09月20日-2026年09月20日`（＝いま選ばれている期間）も出ている。
+    これを見出しと取り違えると **送る回数が 0 になって当月のまま確定する**——
+    しかも画面は普通に動くので、**間違った月のCSVが対象月のものとして落ちる**。
+    このプロジェクトでいちばん怖い壊れ方なので、ここで弾く。
+
+    Vuetify の既定ロケールが英語のこともあるので 'September 2026' も読む。
+    """
+    import re
+    if not text:
+        return None
+    t = str(text).strip()
+    # 日付（日まで）が混じっていたら見出しではない
+    if re.search(r"\d{4}\s*[年/.-]\s*\d{1,2}\s*[月/.-]\s*\d{1,2}", t):
+        return None
+    if re.search(r"\d{1,2}\s*日", t):
+        return None
+    m = re.search(r"(\d{4})\s*[年/.-]\s*(\d{1,2})\s*月?", t)
+    if m:
+        year, month = int(m.group(1)), int(m.group(2))
+    else:
+        m = re.search(r"([A-Za-z]{3,9})\.?\s+(\d{4})", t)
+        if not m:
+            return None
+        name = m.group(1).lower()
+        hit = [i for i, full in enumerate(_EN_MONTHS, 1)
+               if full == name or full.startswith(name)]
+        if len(hit) != 1:
+            return None
+        month, year = hit[0], int(m.group(2))
+    if not (1 <= month <= 12) or not (2000 <= year <= 2099):
+        return None
+    return f"{year:04d}-{month:02d}"
+
+
 _DATE_FORMS = (
     ("%Y-%m-%d", r"^\d{4}-\d{2}-\d{2}$"),
     ("%Y/%m/%d", r"^\d{4}/\d{2}/\d{2}$"),
@@ -531,11 +597,325 @@ def _try_pl_period_by_menu(page, ym: str) -> bool:
         return False
     if not _click_menu_item(page, "期間を指定"):
         return False
+    return _try_custom_range(page, ym)
+
+
+# 期間を確定させるボタンの文字（完全一致で押す）。自動で反映される作りなら
+# どれも無い。**無くても失敗にしない**（最後に画面を読んで判断する）。
+CONFIRM_LABELS = ("適用", "決定", "OK", "確定", "この期間で見る", "適 用", "決 定")
+
+
+def _try_custom_range(page, ym: str) -> bool:
+    """「期間を指定」を開いたあと、対象月の月初〜月末に合わせる。埋め戻しの本体。
+
+    ⚠️ **この先がどんな形かは実測できていない。** 分かっているのは
+    メニューに「期間を指定」があることだけで、押した先がカレンダーなのか
+    入力欄なのかは一度も見ていない。だから**形を決め打ちにしない**。
+    ありうる形を順に試し、**最後に必ず画面を読み直して確かめる**
+    （`_period_matches`）。合わなければ False を返して中止する。
+    **合わせられないまま落とすくらいなら、その月は取らない。**
+    （既定は「今日」なので、そのまま落とすと当日のCSVが対象月のものとして入る。）
+
+    ⚠️ **失敗したら開いた中身をログに出す**（`_dump_open_picker`）。
+    1回流すのに十数分かかるうえ、短時間に何度も流すとOTPが通らなくなる
+    （2026-09-20 に12分で3回流して3回目が弾かれた）。1回で手がかりを取り切る。
+    """
+    start, end = _month_range_label(ym)
+    _note(f"[PL期間] 「期間を指定」で {start}〜{end} に合わせる")
+    for i, (how, fn) in enumerate(
+            (("入力欄", _fill_range_inputs), ("カレンダー", _calendar_pick))):
+        # ⚠️ **確定を押すとピッカーが閉じる。** 閉じたまま次の形を試すと
+        # 必ず空振りするので、開いていなければ開き直す。
+        if i and not _reopen_custom_range(page):
+            break
+        if not fn(page, ym):
+            continue
+        _confirm_picker(page)
+        if _period_matches(page, ym):
+            _note(f"[PL期間] {how}の操作で {ym} に合った")
+            return True
+        _note(f"[PL期間] {how}として操作したが、画面は {ym} になっていない")
+    _note(f"[PL期間] 「期間を指定」で {ym} に合わせられなかった。中身を出す")
     _dump_open_picker(page)
-    if _period_matches(page, ym):
-        return True
-    _note("[PL期間] 「期間を指定」の先はまだ実装していない（上の棚卸しを見て書く）")
     return False
+
+
+def _reopen_custom_range(page) -> bool:
+    """「期間を指定」を開き直す。開けたかを返す。
+
+    確定ボタンを押すとピッカーは閉じる。閉じたまま次の形を試すと必ず
+    空振りするので、次を試す前に開き直す。
+
+    **開いているかを当てにいかない。** この画面は元から `v-overlay` を
+    いくつも持っている（左メニュー、全店舗/グループ/1店舗の切替）ので、
+    「開いているか」の判定自体が一度失敗している。いったん Escape で
+    閉じてから開き直すほうが確実。"""
+    _note("[PL期間] 次の形を試すため、いったん閉じて開き直す")
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
+    return _open_period_menu(page) and _click_menu_item(page, "期間を指定")
+
+
+def _fill_range_inputs(page, ym: str) -> bool:
+    """開いた中に日付の入力欄があれば、月初・月末を入れる。入れたかを返す。
+
+    2欄（開始・終了）と1欄（範囲をまとめて）の両方を見る。
+
+    ⚠️ **Vue は value を直に書いても気づかない。** ネイティブの setter を
+    呼んでから input/change を投げる。これをしないと**画面だけ変わって
+    中身が古いまま**＝当月のCSVが落ちる。
+
+    ⚠️ **`type=date` の欄は `YYYY-MM-DD` しか受け取らない。** 日本語表記を
+    入れると黙って空のままになる。欄の type を見て書式を変える。
+    """
+    ja_s, ja_e = _month_range_label(ym)
+    iso_s, iso_e = _month_range_iso(ym)
+    try:
+        r = page.evaluate(
+            r"""([jaS, jaE, isoS, isoE, jaRange]) => {
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const re = /\d{4}年\d{1,2}月\d{1,2}日|\d{4}[\/-]\d{1,2}[\/-]\d{1,2}/;
+                const setV = (el, v) => {
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value').set;
+                    setter.call(el, v);
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                };
+                const skip = ['hidden', 'checkbox', 'radio', 'submit', 'button'];
+                const all = [...document.querySelectorAll('input')]
+                    .filter(vis).filter(i => !skip.includes(i.type));
+                const cand = all.filter(i => i.type === 'date'
+                    || re.test(i.value || '') || re.test(i.placeholder || ''));
+                if (!cand.length)
+                    return { ok: false, why: '日付らしい入力欄が無い', n_all: all.length };
+                if (cand.length >= 2) {
+                    const [a, b] = cand;
+                    setV(a, a.type === 'date' ? isoS : jaS);
+                    setV(b, b.type === 'date' ? isoE : jaE);
+                    return { ok: true, how: '2欄', n: cand.length };
+                }
+                const only = cand[0];
+                setV(only, only.type === 'date' ? isoS : jaRange);
+                return { ok: true, how: '1欄', n: 1 };
+            }""", [ja_s, ja_e, iso_s, iso_e, f"{ja_s}-{ja_e}"])
+    except Exception as e:
+        _note(f"[PL期間] 入力欄を操作できなかった: {type(e).__name__}: {e}")
+        return False
+    if not r.get("ok"):
+        _note(f"[PL期間] {r.get('why')}（見えている入力欄 {r.get('n_all')}件）")
+        return False
+    if r["n"] > 2:
+        # 比較期間ぶんの欄が並んでいる作りかもしれない。先頭2つに入れたが、
+        # 当たっていなければ下の確認で落ちる。
+        _note(f"[PL期間] 日付欄が {r['n']}件あった。先頭2つを開始・終了として入れた")
+    else:
+        _note(f"[PL期間] 日付の入力欄（{r['how']}）に入れた")
+    page.wait_for_timeout(1500)
+    return True
+
+
+def _calendar_header(page) -> str | None:
+    """開いているカレンダーの見出し（年月）。読めなければ None。"""
+    try:
+        texts = page.evaluate(
+            r"""(sel) => {
+                const cut = s => (s || '').toString().trim().replace(/\s+/g, ' ').slice(0, 40);
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const ov = [...document.querySelectorAll(sel)].filter(vis);
+                const out = [];
+                for (const o of ov) {
+                    o.querySelectorAll(
+                        '.v-date-picker-controls, .v-date-picker-header, '
+                        + '[class*=picker-header], [class*=picker-controls], '
+                        + '[class*=calendar-header], [class*=month-btn], '
+                        + '[class*=month-year]'
+                    ).forEach(h => out.push(cut(h.innerText)));
+                }
+                // 見出しの器が分からないときのために、器の中の短い行も渡す
+                for (const o of ov)
+                    (o.innerText || '').split('
+').map(cut)
+                        .filter(t => t && t.length <= 20).slice(0, 12)
+                        .forEach(t => out.push(t));
+                return [...new Set(out)].filter(Boolean).slice(0, 24);
+            }""", _OVERLAY_SEL)
+    except Exception as e:
+        _note(f"[PL期間] カレンダーの見出しを読めなかった: {type(e).__name__}: {e}")
+        return None
+    for t in texts or []:
+        ym = parse_month_header(t)
+        if ym:
+            return ym
+    return None
+
+
+def _calendar_pick(page, ym: str) -> bool:
+    """カレンダーなら、対象月まで送ってから 1日 と 月末日 を押す。押せたかを返す。
+
+    ⚠️ **送る回数は画面の見出しから決める**（`month_steps`）。今日から
+    逆算すると、ランナーはUTC・画面はJSTなので月初の数時間だけひと月ずれる。
+
+    ⚠️ **隣の月のマスを押さない。** カレンダーは月初の前と月末の後に隣の月の
+    日を並べる。ただ「1」を拾うと**翌月の1日**を押しうる。adjacent / outside /
+    other-month / disabled を外す。
+    """
+    header = _calendar_header(page)
+    if header is None:
+        _note("[PL期間] カレンダーの見出しが見つからない（カレンダーではない？）")
+        return False
+    _note(f"[PL期間] カレンダーの見出し: {header} → 目標 {ym}")
+    for _ in range(MAX_MONTH_STEPS + 1):
+        steps = month_steps(header, ym)
+        if steps == 0:
+            break
+        if abs(steps) > MAX_MONTH_STEPS:
+            _note(f"[PL期間] {abs(steps)}か月も離れている。見出しの読み違いとみて中止")
+            return False
+        if not _calendar_step(page, forward=steps > 0):
+            return False
+        nxt = _calendar_header(page)
+        if nxt is None or nxt == header:
+            _note(f"[PL期間] 送ったのに見出しが {header} のまま。これ以上進めない")
+            return False
+        header = nxt
+    else:
+        _note(f"[PL期間] {MAX_MONTH_STEPS}回送っても {ym} に着かなかった")
+        return False
+    _note(f"[PL期間] {header} まで送った")
+
+    # マスの文字はゼロ埋めされない（"01" ではなく "1"）
+    last_day = int(_month_range_iso(ym)[1][-2:])
+    for label in ("1", str(last_day)):
+        if not _click_day(page, label):
+            _note(f"[PL期間] {label}日のマスを押せなかった")
+            return False
+    page.wait_for_timeout(1500)
+    return True
+
+
+def _calendar_step(page, forward: bool) -> bool:
+    """カレンダーをひと月ぶん送る。押せたかを返す。"""
+    try:
+        ok = page.evaluate(
+            r"""([sel, forward]) => {
+                document.querySelectorAll('[data-claude-nav]')
+                    .forEach(e => e.removeAttribute('data-claude-nav'));
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const want = forward ? /next|forward|右|翌|>|›|▶|❯/
+                                     : /prev|previous|back|左|前|<|‹|◀|❮/;
+                const other = forward ? /prev|previous|back|‹|◀|❮/
+                                      : /next|forward|›|▶|❯/;
+                const ov = [...document.querySelectorAll(sel)].filter(vis);
+                const btns = ov.flatMap(o => [...o.querySelectorAll(
+                    'button, [role=button], i, .v-btn')]).filter(vis);
+                for (const b of btns) {
+                    const hay = [b.getAttribute('aria-label'), b.className,
+                                 b.getAttribute('title'), b.innerText]
+                        .map(x => String(x || '')).join(' ');
+                    if (!want.test(hay) || other.test(hay)) continue;
+                    b.setAttribute('data-claude-nav', '1');
+                    return true;
+                }
+                return false;
+            }""", [_OVERLAY_SEL, forward])
+    except Exception as e:
+        _note(f"[PL期間] 送るボタンを探せなかった: {type(e).__name__}: {e}")
+        return False
+    if not ok:
+        _note(f"[PL期間] {'次' if forward else '前'}の月へ送るボタンが無い")
+        return False
+    try:
+        page.locator("[data-claude-nav='1']").first.click(timeout=5000)
+    except Exception as e:
+        _note(f"[PL期間] 送るボタンを押せなかった: {type(e).__name__}")
+        return False
+    page.wait_for_timeout(1200)
+    return True
+
+
+def _click_day(page, day: str) -> bool:
+    """カレンダーの日のマスを押す。**隣の月の埋めマスは押さない。**"""
+    try:
+        ok = page.evaluate(
+            r"""([sel, day]) => {
+                document.querySelectorAll('[data-claude-day]')
+                    .forEach(e => e.removeAttribute('data-claude-day'));
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                // 隣の月の埋め・選べないマスを外す。ここを外さないと
+                // 「1」で翌月の1日を押してしまう。
+                const bad = /adjacent|outside|other-?month|sibling|disabled|hide/i;
+                const ov = [...document.querySelectorAll(sel)].filter(vis);
+                const cells = ov.flatMap(o => [...o.querySelectorAll(
+                    'button, [role=gridcell], [role=option], td')])
+                    .filter(vis)
+                    .filter(el => !bad.test(String(el.className || ''))
+                                  && !bad.test(String(
+                                      (el.parentElement || {}).className || ''))
+                                  && !el.disabled
+                                  && el.getAttribute('aria-disabled') !== 'true')
+                    .filter(el => (el.innerText || '').trim() === day);
+                if (!cells.length) return false;
+                cells[0].setAttribute('data-claude-day', '1');
+                return true;
+            }""", [_OVERLAY_SEL, day])
+    except Exception as e:
+        _note(f"[PL期間] {day}日を探せなかった: {type(e).__name__}: {e}")
+        return False
+    if not ok:
+        return False
+    try:
+        page.locator("[data-claude-day='1']").first.click(timeout=5000)
+    except Exception as e:
+        _note(f"[PL期間] {day}日を押せなかった: {type(e).__name__}")
+        return False
+    page.wait_for_timeout(1200)
+    return True
+
+
+def _confirm_picker(page):
+    """期間を確定させるボタンがあれば押す。**無くても失敗にしない。**
+
+    自動で反映される作りなら確定ボタンは無い。ここで False を返して
+    諦めると、合っているのに取らないことになる。合ったかどうかは
+    呼び出し側が画面を読んで決める。"""
+    try:
+        found = page.evaluate(
+            r"""([sel, labels]) => {
+                document.querySelectorAll('[data-claude-ok]')
+                    .forEach(e => e.removeAttribute('data-claude-ok'));
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const ov = [...document.querySelectorAll(sel)].filter(vis);
+                const btns = ov.flatMap(o => [...o.querySelectorAll(
+                    'button, [role=button], .v-btn')]).filter(vis);
+                for (const b of btns) {
+                    const t = (b.innerText || '').trim();
+                    if (!labels.includes(t)) continue;
+                    b.setAttribute('data-claude-ok', '1');
+                    return t;
+                }
+                return '';
+            }""", [_OVERLAY_SEL, list(CONFIRM_LABELS)])
+    except Exception as e:
+        _note(f"[PL期間] 確定ボタンを探せなかった: {type(e).__name__}: {e}")
+        return
+    if not found:
+        _note("[PL期間] 確定ボタンは見当たらない（自動反映とみて先へ進む）")
+        return
+    try:
+        page.locator("[data-claude-ok='1']").first.click(timeout=5000)
+        _note(f"[PL期間] 『{found}』を押した")
+    except Exception as e:
+        _note(f"[PL期間] 『{found}』を押せなかった: {type(e).__name__}")
+    page.wait_for_timeout(2500)
 
 
 def _dump_open_picker(page):
@@ -1046,6 +1426,7 @@ def fetch_cost_csv(page, ym: str) -> bytes | None:
     **期間を合わせられなければ取らない。** 既定は「今日」なので、そのまま
     落とすと当日のCSVを対象月のものとして取り込むことになる。
     取れないことより、間違った月が入るほうが悪い。"""
+    back_to = page.url or ""
     target = _click_maybe_popup(page, "分析")
     if target is None:
         _note("[原価] メニュー『分析』を押せなかった")
@@ -1076,6 +1457,16 @@ def fetch_cost_csv(page, ym: str) -> bytes | None:
                 target.close()
             except Exception:
                 pass
+        elif (page.url or "") != back_to:
+            # 同じタブで分析サイトへ移っていた場合。**戻さないと次の月が
+            # 「過去売上実績の画面ではない」まま走る**（埋め戻しで効く）。
+            # URL直打ちはSSOのセッションを壊しうるので履歴で戻る。
+            _note("[原価] 同じタブで開いていたので元の画面へ戻る")
+            try:
+                page.go_back(wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(3000)
+            except Exception as e:
+                _note(f"[原価] 元の画面へ戻れなかった: {type(e).__name__}: {e}")
 
 
 def cost_of(data: bytes | None) -> float | None:
@@ -1128,14 +1519,22 @@ def cost_of(data: bytes | None) -> float | None:
     return None
 
 
-def fetch_csv(ym: str) -> tuple[bytes, dict, bytes | None]:
-    """売上CSVと、店舗コード→店舗名の対応表と、原価CSVを返す。
+def fetch_many(yms: list[str]) -> dict[str, tuple[bytes, dict, bytes | None]]:
+    """指定した月ぶんを **1回のログインで** 取る。月 → (売上CSV, 店舗名, 原価CSV)。
 
     CSVには店舗コードしか入っていないので、店舗名は画面のセレクトから取る。
     原価は別サイト（分析）の損益PL集計から取る。**取れなければ None** で、
-    売上の取り込み自体は続ける（原価が無いことで売上まで落とさない）。"""
+    売上の取り込み自体は続ける（原価が無いことで売上まで落とさない）。
+
+    ⚠️ **月ごとに実行を分けてはいけない。** 2026-09-20 に12分のあいだに
+    3回ログインしたところ、**3回目でOTPが通らなくなった**。埋め戻しは
+    「月数ぶんワークフローを回す」ような使い方にしない。ここが1回の
+    ログインで全月まわす作りになっているのはそのため。
+
+    取れなかった月はキーを立てない（呼び出し側で「取れなかった」と出す）。
+    """
     company = C.env("ULEJI_COMPANY"); user = C.env("ULEJI_USER"); pw = C.env("ULEJI_PASS")
-    globals()["TARGET_YM"] = ym
+    globals()["TARGET_YM"] = yms[0]
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         ctx = browser.new_context(accept_downloads=True)
@@ -1168,21 +1567,37 @@ def fetch_csv(ym: str) -> tuple[bytes, dict, bytes | None]:
                 print(f"  {line}")
             C.write_findings("uleji", FINDINGS)
             browser.close()
-            return b"", {}, None
+            return {}
 
         if otp:
             _submit_otp(page)
 
         # ---- 実取得: 過去売上実績 → 対象月を指定 → CSVダウンロード ----
+        out: dict[str, tuple[bytes, dict, bytes | None]] = {}
         try:
             _open_past_sales(page)
             names = _store_options(page)
-            data = _download_month(page, ym, already_open=True)
-            # 原価は別サイト。ここで失敗しても売上は返す。
-            cost = fetch_cost_csv(page, ym)
+            for i, ym in enumerate(yms):
+                # 診断の中からも対象月が要る（PL集計の期間を合わせるため）
+                globals()["TARGET_YM"] = ym
+                if len(yms) > 1:
+                    print(f"[uleji] ===== {ym}（{i + 1}/{len(yms)}） =====")
+                try:
+                    # ⚠️ 2か月目からは画面を開き直す。原価は別サイト（分析）で、
+                    # 同じタブに開いた場合は戻ってこない。開き直さないと
+                    # **2か月目が「過去売上実績の画面ではない」まま走る。**
+                    data = _download_month(page, ym, already_open=(i == 0))
+                except Exception as e:
+                    # **1か月の失敗で残りを捨てない。** 埋め戻しは十数分かかるうえ、
+                    # 流し直すとOTPが弾かれる。取れた月は持ち帰る。
+                    _note(f"[uleji] {ym} の売上CSVを取れなかった: {type(e).__name__}: {e}")
+                    continue
+                # 原価は別サイト。ここで失敗しても売上は返す。
+                cost = fetch_cost_csv(page, ym)
+                out[ym] = (data, names, cost)
         finally:
             browser.close()
-        return data, names, cost
+        return out
 
 
 def _num(v) -> float | None:
@@ -1279,26 +1694,48 @@ def normalize(rows: list[dict], ym: str, store_names: dict | None = None,
 
 
 def main():
-    ym = C.last_month(sys.argv[1] if len(sys.argv) > 1 else None)
-    # 診断の中からも対象月が要る（PL集計の期間を合わせるため）。
-    globals()["TARGET_YM"] = ym
-    data, store_names, cost_data = fetch_csv(ym)
-    if not data:  # 診断モードは空で返る
+    # 引数は1か月（2026-08）でも、範囲（2026-05:2026-08）でも、
+    # とびとび（2026-05,2026-08）でもよい。空なら先月ひとつ。
+    yms = C.parse_months(sys.argv[1] if len(sys.argv) > 1 else None)
+    globals()["TARGET_YM"] = yms[0]
+    if len(yms) > 1:
+        print(f"[uleji] 埋め戻し {len(yms)}か月（{yms[0]}〜{yms[-1]}）。"
+              "ログインは1回で全月まわします")
+    got = fetch_many(yms)
+    if not got:
+        # 診断モードは空で返る。本番で空なら、全月落としたということ。
+        if not C.is_diag():
+            print(f"[uleji] {len(yms)}か月すべて取得できませんでした（上のログ参照）")
         return
-    rows = normalize(C.parse_csv_bytes(data), ym, store_names,
-                     cost=cost_of(cost_data))
-    print(f"[uleji] {ym}: {len(rows)}店取得")
-    # 先に絞ってから数える。除外前を数えると「書いていない行」まで
-    # 埋まっているように見える。
-    rows = C.keep_our_stores(rows, "（新Uレジ）")
+
+    # ⚠️ **シートへの書き込みは最後に1回。** write_to_sheet は
+    # 「同じ(年月×店舗×POS)の既存行を消してから書き戻す」作りなので、
+    # 月ごとに呼ぶと**そのたびシート全体を消して書き直す**ことになり、
+    # 途中で Sheets の書き込み上限に当たるとシートが空のまま止まる。
+    rows_all: list[dict] = []
+    for ym in yms:
+        if ym not in got:
+            print(f"[uleji] {ym}: 取れませんでした（上のログ参照）")
+            continue
+        data, store_names, cost_data = got[ym]
+        rows = normalize(C.parse_csv_bytes(data), ym, store_names,
+                         cost=cost_of(cost_data))
+        print(f"[uleji] {ym}: {len(rows)}店取得")
+        # 先に絞ってから数える。除外前を数えると「書いていない行」まで
+        # 埋まっているように見える。
+        rows_all += C.keep_our_stores(rows, f"（新Uレジ {ym}）")
+    if not rows_all:
+        print("[uleji] 書き込む行がありません")
+        return
     # 出力先がローカルCSVだと中身を見られないので、埋まり具合だけ出す。
     # 金額は公開ログに残せない。
-    C.report_filled(rows, "（新Uレジ）")
+    C.report_filled(rows_all, "（新Uレジ）")
     sid = C.env("TARGET_SHEET_ID")
     if sid:
-        C.write_to_sheet(rows, sid, worksheet="POS売上")
+        C.write_to_sheet(rows_all, sid, worksheet="POS売上")
     else:
-        C.write_local_csv(rows, f"uleji_{ym}.csv")
+        name = yms[0] if len(yms) == 1 else f"{yms[0]}_{yms[-1]}"
+        C.write_local_csv(rows_all, f"uleji_{name}.csv")
 
 
 if __name__ == "__main__":

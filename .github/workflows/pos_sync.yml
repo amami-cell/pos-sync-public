@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       month:
-        description: '対象月 YYYY-MM（空なら先月）'
+        description: '対象月。YYYY-MM / 範囲 2026-05:2026-08 / とびとび 2026-05,2026-08（空なら先月）'
         required: false
       diag:
         description: '診断モード（画面構造をログに出力。導線確定用）: 1 で有効'
@@ -27,6 +27,10 @@ jobs:
           pip install playwright gspread google-auth pandas pyyaml
           python -m playwright install --with-deps chromium
       - name: dinii
+        # 埋め戻し（範囲・複数月）は新Uレジ側だけの機能。ダイニーは単月しか
+        # 解さないので、範囲を渡すとそのまま「対象月」として扱われてしまう。
+        # 範囲指定のときは走らせない。
+        if: ${{ !contains(github.event.inputs.month, ':') && !contains(github.event.inputs.month, ',') }}
         env:
           DINII_LOGIN_URL: ${{ secrets.DINII_LOGIN_URL }}
           DINII_USER: ${{ secrets.DINII_USER }}
