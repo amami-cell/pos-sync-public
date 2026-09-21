@@ -78,23 +78,6 @@ def test_原価が取れなくても売上は載る():
     rows = [{"店舗コード": "0009", "日付": "2026-08-01", "売上": "1000", "客数": "10"}]
     out = U.normalize(rows, "2026-08", {"0009": "大衆酒場 ぎふや"}, cost=None)
     assert out[0]["売上"] == 1000 and out[0]["原価"] == ""
-
-
-def _main():
-    fns = [(n, f) for n, f in sorted(globals().items())
-           if n.startswith("test_") and callable(f)]
-    bad = 0
-    for name, fn in fns:
-        try:
-            fn(); print(f"OK {name}")
-        except AssertionError as e:
-            bad += 1; print(f"NG {name}: {e}")
-    print("---", f"{len(fns)}件 全部通りました" if not bad else f"{bad}件 失敗")
-    sys.exit(1 if bad else 0)
-
-
-
-
 def test_原価0は未登録として扱う():
     # 新Uレジの損益PL集計の材料原価は「原価・販管費登録」画面への手入力が元。
     # 入力されていない店は 0 で落ちてくる。実測（2026-08 ぎふや福岡天神）が
@@ -118,5 +101,25 @@ def test_負の原価も採らない():
     assert U.cost_of(_csv(["材料原価"], [-100])) is None
 
 
+def test_マスタに無い店は書かない():
+    # ダイニーのアカウントは90店舗ぶん見えている。素通しすると他社の店が並ぶ
+    # （実測で14行中11行がよその店だった）。
+    import pos_common as C
+    rows = [
+        {"店舗名": "大衆居酒屋ちゃ～ちゃん", "店舗コード": "1111"},
+        {"店舗名": "喰人梅田東通り店", "店舗コード": ""},
+        {"店舗名": "横綱 堂山", "店舗コード": None},
+        {"店舗名": "Italian Bar NagaGutsu", "店舗コード": "1151"},
+    ]
+    got = C.keep_our_stores(rows, "（テスト）")
+    assert [r["店舗コード"] for r in got] == ["1111", "1151"]
+
+
+def test_全部よその店なら空になる():
+    import pos_common as C
+    assert C.keep_our_stores([{"店舗名": "よそ", "店舗コード": ""}], "（テスト）") == []
+
+
 if __name__ == "__main__":
-    _main()
+    from _runner import main
+    main(globals(), __file__)

@@ -108,6 +108,34 @@ def parse_csv_bytes(data: bytes, encodings=ENCODINGS) -> list[dict]:
     return _decode_csv(data, encodings)
 
 # ---- 出力1: ローカルCSV（既存GASが取り込む運用に合わせる場合）----
+def keep_our_stores(rows: list[dict], label: str = "") -> list[dict]:
+    """店舗マスタで引けた店の行だけ残す。**よその会社の店を書き込まない。**
+
+    ダイニーのアカウントは90店舗ぶん見えており、そのうちイニシエートの店は
+    ごく一部。素通しで書くと、他社の店舗名がシートに並ぶ（実測で14行中11行が
+    よその店だった）。
+
+    **落とした店の名前は既定では出さない。** 他社の店舗一覧を公開リポジトリの
+    ジョブログに残さないため。表記ゆれの調査が要るときは POS_DIAG=1 で出す。
+
+    ⚠️ **残った店の名前は必ず出す。** うちの店が表記ゆれで落ちたときに、
+    黙って消えると気づけない。件数だけでなく名前を見て確認すること。
+    """
+    ours = [r for r in rows if str(r.get("店舗コード") or "").strip()]
+    dropped = len(rows) - len(ours)
+    print(f"[マスタ照合{label}] {len(ours)}店を残す / {dropped}店を除外（マスタに無い店）")
+    for r in ours:
+        print(f"    ○ {r.get('店舗コード')}\t{r.get('店舗名')}")
+    if dropped and is_diag():
+        print("    除外した表記（診断モードのみ表示）:")
+        for r in rows:
+            if not str(r.get("店舗コード") or "").strip():
+                print(f"    × {r.get('店舗名')}")
+    elif dropped:
+        print("    ※ 除外した表記を見るには POS_DIAG=1 で流す")
+    return ours
+
+
 def report_filled(rows: list[dict], label: str = ""):
     """どの列が埋まったかだけを出す。**実数は出さない。**
 

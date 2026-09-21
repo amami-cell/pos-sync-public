@@ -23,29 +23,6 @@ def test_月はゼロ埋めする():
     # 画面の表記は 2026年01月01日。ゼロを落とすと一致判定が通らず、
     # 「合わせられなかった」と誤って中止する
     assert _month_range_label("2026-01") == ("2026年01月01日", "2026年01月31日")
-
-
-def _main():
-    """pytest でもスクリプトでも同じものを走らせる。
-
-    以前はここに呼び出しを並べていたため、**あとから足したテストが
-    スクリプト実行では走らず**、それでも「全部通りました」と出ていた。
-    数えて出すようにする。"""
-    import sys as _sys
-    fns = [(n, f) for n, f in sorted(globals().items())
-           if n.startswith("test_") and callable(f)]
-    bad = 0
-    for name, fn in fns:
-        try:
-            fn()
-            print(f"OK {name}")
-        except AssertionError as e:
-            bad += 1
-            print(f"NG {name}: {e}")
-    print("---", f"{len(fns)}件 全部通りました" if not bad else f"{bad}件 失敗")
-    _sys.exit(1 if bad else 0)
-
-
 def test_日付らしい値の書式を見分ける():
     from uleji_sync import _date_form
     assert _date_form("2026-08-01") == "%Y-%m-%d"
@@ -76,4 +53,5 @@ def test_クエリの鍵は出すが怪しい値は伏せる():
 
 
 if __name__ == "__main__":
-    _main()
+    from _runner import main
+    main(globals(), __file__)

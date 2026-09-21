@@ -783,6 +783,9 @@ def main():
         return
     rows = normalize(C.parse_csv_bytes(data), ym)
     print(f"[dinii] {ym}: {len(rows)}店取得")
+    # よその会社の店は書かない（ダイニーは90店舗ぶん見えている）
+    rows = C.keep_our_stores(rows, "（ダイニー）")
+    C.report_filled(rows, "（ダイニー）")
     sid = C.env("TARGET_SHEET_ID")
     if sid:
         C.write_to_sheet(rows, sid, worksheet="POS売上")
