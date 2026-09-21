@@ -1275,6 +1275,9 @@ def main():
     rows = normalize(C.parse_csv_bytes(data), ym, store_names,
                      cost=cost_of(cost_data))
     print(f"[uleji] {ym}: {len(rows)}店取得")
+    # 出力先がローカルCSVだと中身を見られないので、埋まり具合だけ出す。
+    # 金額は公開ログに残せない。
+    C.report_filled(rows, "（新Uレジ）")
     sid = C.env("TARGET_SHEET_ID")
     if sid:
         C.write_to_sheet(rows, sid, worksheet="POS売上")

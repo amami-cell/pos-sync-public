@@ -108,6 +108,25 @@ def parse_csv_bytes(data: bytes, encodings=ENCODINGS) -> list[dict]:
     return _decode_csv(data, encodings)
 
 # ---- 出力1: ローカルCSV（既存GASが取り込む運用に合わせる場合）----
+def report_filled(rows: list[dict], label: str = ""):
+    """どの列が埋まったかだけを出す。**実数は出さない。**
+
+    公開リポジトリのジョブログなので、売上・原価の金額は残せない。
+    それでも「取れたのか / どの列が空なのか」は見えないと、成功したかどうかが
+    判定できない。列ごとに「埋まった行数 / 全行数」だけを出す。
+
+    金額を出したくなったら、それは出力先（シート）で見ること。
+    """
+    if not rows:
+        print(f"[埋まり具合{label}] 行が無い")
+        return
+    print(f"[埋まり具合{label}] {len(rows)}行:")
+    for col in COLUMNS:
+        n = sum(1 for r in rows if str(r.get(col, "")).strip() != "")
+        mark = "○" if n == len(rows) else ("△" if n else "×")
+        print(f"    {mark} {col}\t{n}/{len(rows)}")
+
+
 def write_local_csv(rows: list[dict], path: str):
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=COLUMNS)
