@@ -1097,18 +1097,31 @@ def cost_of(data: bytes | None) -> float | None:
     if len(rows) != 1:
         _note(f"[原価] 1行のはずが {len(rows)}行。前提が変わったので使わない")
         return None
-    seen = []
+    seen, zero = [], []
     for key in ("材料原価", "総原価"):
         if key not in rows[0]:
             continue
         seen.append(key)
         value = _num(rows[0][key])
-        if value is not None:
-            _note(f"[原価] 列『{key}』から取得")
-            return value
-    # 「列が無い」と「列はあるが空」は原因が違う。前者は帳票が変わった疑い、
-    # 後者はその月にデータが無いだけ。取り違えると探す場所を間違える。
-    if seen:
+        if value is None:
+            continue
+        if value <= 0:
+            # **0 は「原価なし」ではなく「未登録」。** 売上が立っている月に
+            # 材料原価0はありえない。0を載せると「原価がタダの店」として
+            # 資料に出てしまう（画面の cost_rate 0% と同じ罠）。
+            zero.append(key)
+            continue
+        _note(f"[原価] 列『{key}』から取得")
+        return value
+
+    if zero:
+        # 画面ごと未登録なのか、原価だけ未登録なのかで打ち手が違う。
+        # 売上実績も0なら、損益PL集計そのものが使われていない。
+        uri = _num(rows[0].get("売上実績"))
+        ba = "売上実績も0（損益PL集計そのものが未使用）" if not uri else \
+             "売上実績は入っている（原価・販管費登録だけが未入力）"
+        _note(f"[原価] 列 {zero} が0。**未登録として扱い、載せない**（{ba}）")
+    elif seen:
         _note(f"[原価] 列 {seen} はあるが値が空。その月のデータが無い")
     else:
         _note(f"[原価] 原価の列が見つからない（列名: {list(rows[0])[:8]}…）")
