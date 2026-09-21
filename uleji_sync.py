@@ -16,8 +16,13 @@ FINDINGS: list[str] = []
 
 def _note(line: str):
     """あとでまとめて出す調査メモ。ログのtailが後続ステップで埋まるので、
-    結論はステップの最後にまとめて出す。"""
+    結論はステップの最後にまとめて出す。
+
+    **本番（診断モードでない）ではまとめを出さない**ので、その場で印字する。
+    これをしないと、本番で期間を合わせられなかった理由がどこにも残らない。"""
     FINDINGS.append(line)
+    if not C.is_diag():
+        print(line)
 
 
 def _base() -> str:
@@ -646,10 +651,12 @@ def _cost_lines(page, label: str):
             _note(f"      - {m}")
 
 
-def _open_card(page, label: str, tag: str) -> bool:
-    """『label』のカードの中にある「詳細を表示」を押す。
+def _click_card_detail(page, label: str) -> bool:
+    """『label』のカードの中にある「詳細を表示」を押す。押せたかを返す。
+
     ダッシュボードには同じ文言のボタンがカードの数だけあるので、
-    見えている先頭を押すと別のカード（売上）に行ってしまう。
+    **見えている先頭を押すと別のカード（売上）に行ってしまう**
+    （実際それで `/v2/sales/analysis` に着き「原価が無い」と誤判定した）。
     目印をDOMに付けてから、その目印を押す。"""
     try:
         found = page.evaluate(
@@ -668,12 +675,29 @@ def _open_card(page, label: str, tag: str) -> bool:
                 }
                 return 'カード内に詳細ボタンが無い';
             }""", label)
-        if found != "ok":
-            _note(f"[分析] 『{label}』のカードを開けない: {found}")
-            return False
+    except Exception as e:
+        _note(f"[分析] 『{label}』のカードを探せなかった: {type(e).__name__}: {e}")
+        return False
+    if found != "ok":
+        _note(f"[分析] 『{label}』のカードを開けない: {found}")
+        return False
+    try:
         page.locator("[data-claude-target='1']").first.click(timeout=5000)
-        page.wait_for_timeout(6000)
-        _note(f"[分析] 『{label}』の詳細を開いた → {C.safe_url(page.url)}")
+    except Exception as e:
+        _note(f"[分析] 『{label}』の詳細を押せなかった: {type(e).__name__}")
+        return False
+    page.wait_for_timeout(6000)
+    _note(f"[分析] 『{label}』の詳細を開いた → {C.safe_url(page.url)}")
+    return True
+
+
+def _open_card(page, label: str, tag: str) -> bool:
+    """診断用。カードを開いて、画面の中身を棚卸しする。
+    押す処理そのものは本番と同じ `_click_card_detail()` を使う
+    （2つ持つと、片方だけ直す事故が起きる）。"""
+    try:
+        if not _click_card_detail(page, label):
+            return False
         C.diag_dump(page, f"{tag}_{label}")
         _screen_report(page, f"分析({label})")
         _cost_lines(page, f"分析({label})")
@@ -1013,9 +1037,90 @@ def _download_month(page, ym: str, already_open: bool = False) -> bytes:
     return data
 
 
-def fetch_csv(ym: str) -> tuple[bytes, dict]:
-    """CSVと、店舗コード→店舗名の対応表を返す。CSVには店舗コードしか
-    入っていないので、店舗名は画面のセレクトから取る。"""
+def fetch_cost_csv(page, ym: str) -> bytes | None:
+    """分析サイトの損益(PL)集計から、対象月の原価CSVを取る。取れなければ None。
+
+    導線: 『分析』（別タブで開く）→ SSOの転送を待つ →
+          FLコストのカードの「詳細を表示」→ 期間を対象月へ → CSV
+
+    **期間を合わせられなければ取らない。** 既定は「今日」なので、そのまま
+    落とすと当日のCSVを対象月のものとして取り込むことになる。
+    取れないことより、間違った月が入るほうが悪い。"""
+    target = _click_maybe_popup(page, "分析")
+    if target is None:
+        _note("[原価] メニュー『分析』を押せなかった")
+        return None
+    try:
+        _wait_sso(target, "原価")
+        if _on_login_page(target):
+            _note("[原価] 分析サイトでログイン画面に戻された")
+            return None
+        if not _click_card_detail(target, "FLコスト"):
+            return None
+        if not _select_pl_period(target, ym):
+            _note(f"[原価] 期間を {ym} に合わせられないので取らない")
+            return None
+        # このボタンの文字はちょうど「CSV」。完全一致で探すので
+        # 「CSV一括設定」のような書き込み系には当たらない。
+        with target.expect_download(timeout=120000) as dl:
+            target.get_by_text("CSV", exact=True).first.click(timeout=8000)
+        data = open(dl.value.path(), "rb").read()
+        _note(f"[原価] {ym} のCSVを取得: {C.sniff_bytes(data)}")
+        return data
+    except Exception as e:
+        _note(f"[原価] 取得に失敗: {type(e).__name__}: {e}")
+        return None
+    finally:
+        if target is not page:
+            try:
+                target.close()
+            except Exception:
+                pass
+
+
+def cost_of(data: bytes | None) -> float | None:
+    """原価CSVから材料原価を取り出す。取れなければ None。
+
+    **列名で引く。** 列数は月によって変わる（データのある列だけ出る。
+    実測で 53列 と 54列）ので、位置で引くとずれる。
+
+    この帳票は**期間ぶんを1行にまとめた集計**なので1行しか来ない。
+    2行以上来たら前提が変わったということなので、足さずに諦める
+    （黙って合計すると、店が増えた月から静かに二重計上になる）。"""
+    if not data:
+        return None
+    try:
+        rows = C.parse_csv_bytes(data)
+    except Exception as e:
+        _note(f"[原価] CSVを読めなかった: {type(e).__name__}: {e}")
+        return None
+    if len(rows) != 1:
+        _note(f"[原価] 1行のはずが {len(rows)}行。前提が変わったので使わない")
+        return None
+    seen = []
+    for key in ("材料原価", "総原価"):
+        if key not in rows[0]:
+            continue
+        seen.append(key)
+        value = _num(rows[0][key])
+        if value is not None:
+            _note(f"[原価] 列『{key}』から取得")
+            return value
+    # 「列が無い」と「列はあるが空」は原因が違う。前者は帳票が変わった疑い、
+    # 後者はその月にデータが無いだけ。取り違えると探す場所を間違える。
+    if seen:
+        _note(f"[原価] 列 {seen} はあるが値が空。その月のデータが無い")
+    else:
+        _note(f"[原価] 原価の列が見つからない（列名: {list(rows[0])[:8]}…）")
+    return None
+
+
+def fetch_csv(ym: str) -> tuple[bytes, dict, bytes | None]:
+    """売上CSVと、店舗コード→店舗名の対応表と、原価CSVを返す。
+
+    CSVには店舗コードしか入っていないので、店舗名は画面のセレクトから取る。
+    原価は別サイト（分析）の損益PL集計から取る。**取れなければ None** で、
+    売上の取り込み自体は続ける（原価が無いことで売上まで落とさない）。"""
     company = C.env("ULEJI_COMPANY"); user = C.env("ULEJI_USER"); pw = C.env("ULEJI_PASS")
     globals()["TARGET_YM"] = ym
     with sync_playwright() as p:
@@ -1050,7 +1155,7 @@ def fetch_csv(ym: str) -> tuple[bytes, dict]:
                 print(f"  {line}")
             C.write_findings("uleji", FINDINGS)
             browser.close()
-            return b"", {}
+            return b"", {}, None
 
         if otp:
             _submit_otp(page)
@@ -1060,9 +1165,11 @@ def fetch_csv(ym: str) -> tuple[bytes, dict]:
             _open_past_sales(page)
             names = _store_options(page)
             data = _download_month(page, ym, already_open=True)
+            # 原価は別サイト。ここで失敗しても売上は返す。
+            cost = fetch_cost_csv(page, ym)
         finally:
             browser.close()
-        return data, names
+        return data, names, cost
 
 
 def _num(v) -> float | None:
@@ -1079,10 +1186,16 @@ def _num(v) -> float | None:
         return None
 
 
-def normalize(rows: list[dict], ym: str, store_names: dict | None = None) -> list[dict]:
+def normalize(rows: list[dict], ym: str, store_names: dict | None = None,
+              cost: float | None = None) -> list[dict]:
     """新Uレジの日別CSV（店舗コード/日付/売上/客数）を月次にまとめる。
     店舗コードはUSEN側の体系なので、店舗セレクトの対応表で店舗名に直し、
-    店舗名から店舗マスタ（FWの店舗コード）を引く。"""
+    店舗名から店舗マスタ（FWの店舗コード）を引く。
+
+    `cost` は損益PL集計から取った**その月の材料原価**（店舗の区別なし）。
+    フードとドリンクに分かれていないので `原価` 列に入れる。
+    **CSVの店舗が1つのときだけ**付ける。複数あるのに1つの数字を配ると、
+    どの店の原価でもない数字が全店に載る。"""
     stores = C.load_stores()
     idx = C.build_store_index(stores)
     names = store_names or {}
@@ -1125,12 +1238,20 @@ def normalize(rows: list[dict], ym: str, store_names: dict | None = None) -> lis
         # 満額の月次として扱うと、前年比や達成率が静かに狂う。
         note = (f"新Uレジ 日別{a['日数']}日分を合算"
                 f"（売上入力{a['売上あり']}日）{extra}")
+        # 原価は店舗の区別なく1つ。CSVの店舗が1つのときだけ載せる。
+        this_cost = ""
+        if cost is not None and len(agg) == 1:
+            this_cost = int(cost)
+            note += "／原価は損益PL集計の材料原価（フード・ドリンクの内訳なし）"
+        elif cost is not None:
+            note += f"／原価は店舗が{len(agg)}件のため付けない"
         out.append({
             "年月": ym,
             "店舗名": name,
             "売上": int(a["売上"]) if a["売上あり"] else "",
-            "フード原価": "",      # 新Uレジの過去売上実績CSVに原価の列は無い
+            "フード原価": "",      # 新Uレジは原価がフード・ドリンクに分かれない
             "ドリンク原価": "",
+            "原価": this_cost,
             "客数": int(a["客数"]) if a["客数あり"] else "",
             "備考": note,
             "取込日時": C.now_str(),
@@ -1148,10 +1269,11 @@ def main():
     ym = C.last_month(sys.argv[1] if len(sys.argv) > 1 else None)
     # 診断の中からも対象月が要る（PL集計の期間を合わせるため）。
     globals()["TARGET_YM"] = ym
-    data, store_names = fetch_csv(ym)
+    data, store_names, cost_data = fetch_csv(ym)
     if not data:  # 診断モードは空で返る
         return
-    rows = normalize(C.parse_csv_bytes(data), ym, store_names)
+    rows = normalize(C.parse_csv_bytes(data), ym, store_names,
+                     cost=cost_of(cost_data))
     print(f"[uleji] {ym}: {len(rows)}店取得")
     sid = C.env("TARGET_SHEET_ID")
     if sid:
