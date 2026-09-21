@@ -622,6 +622,11 @@ def _try_custom_range(page, ym: str) -> bool:
     """
     start, end = _month_range_label(ym)
     _note(f"[PL期間] 「期間を指定」で {start}〜{end} に合わせる")
+    # ⚠️ **試す前に中身を出す。** 失敗したあとに出すと、こちらの操作で
+    # 画面が変わったあとの姿しか見えない。実測（2026-09-21）では、外した値を
+    # 入れて OK を押したせいで**期間が「今日」に戻った**状態を見ていた。
+    # 形が確定したらこの1行は消してよい。
+    _dump_open_picker_text(page)
     shapes = (
         ("日付の入った欄", lambda p, y: _fill_range_inputs(p, y)),
         ("空の欄・年月日", lambda p, y: _fill_bare_input(p, y, "ja")),
@@ -728,10 +733,16 @@ def _fill_bare_input(page, ym: str, style: str) -> bool:
                 const vis = el => el.offsetParent !== null
                                   || getComputedStyle(el).position === 'fixed';
                 const skip = ['hidden', 'checkbox', 'radio', 'submit', 'button'];
+                // ⚠️ 期間セレクタ自身の input を打ち込み先にしない。実測で
+                // 唯一見えている input-64 は v-field の開閉用（aria-label=Open）で、
+                // ここに打って OK を押すと**期間が「今日」に戻る**。
+                const own = i => i.closest('.v-field')
+                    || (i.getAttribute('aria-label') || '').trim() === 'Open';
                 const all = [...document.querySelectorAll('input')]
                     .filter(vis)
                     .filter(i => !skip.includes(i.type))
-                    .filter(i => !(i.readOnly || i.getAttribute('readonly') !== null));
+                    .filter(i => !(i.readOnly || i.getAttribute('readonly') !== null))
+                    .filter(i => !own(i));
                 all.forEach((el, i) => el.setAttribute('data-claude-bare', String(i + 1)));
                 return all.length;
             }""")
@@ -766,9 +777,15 @@ def _fill_bare_input(page, ym: str, style: str) -> bool:
                 const vis = el => el.offsetParent !== null
                                   || getComputedStyle(el).position === 'fixed';
                 const skip = ['hidden', 'checkbox', 'radio', 'submit', 'button'];
+                // ⚠️ 期間セレクタ自身の input を打ち込み先にしない。実測で
+                // 唯一見えている input-64 は v-field の開閉用（aria-label=Open）で、
+                // ここに打って OK を押すと**期間が「今日」に戻る**。
+                const own = i => i.closest('.v-field')
+                    || (i.getAttribute('aria-label') || '').trim() === 'Open';
                 const all = [...document.querySelectorAll('input')]
                     .filter(vis).filter(i => !skip.includes(i.type))
-                    .filter(i => !(i.readOnly || i.getAttribute('readonly') !== null));
+                    .filter(i => !(i.readOnly || i.getAttribute('readonly') !== null))
+                    .filter(i => !own(i));
                 all.forEach((el, i) => el.setAttribute('data-claude-bare', String(i + 1)));
                 return all.length;
             }""")
@@ -861,8 +878,7 @@ def _calendar_header(page) -> str | None:
                 }
                 // 見出しの器が分からないときのために、器の中の短い行も渡す
                 for (const o of ov)
-                    (o.innerText || '').split('
-').map(cut)
+                    (o.innerText || '').split('\n').map(cut)
                         .filter(t => t && t.length <= 20).slice(0, 12)
                         .forEach(t => out.push(t));
                 return [...new Set(out)].filter(Boolean).slice(0, 24);
@@ -1104,8 +1120,7 @@ def _dump_open_picker_text(page):
                 // 器ごとの文字（行単位）
                 const lines = [];
                 for (const o of ov)
-                    (o.innerText || '').split('
-').map(cut).filter(Boolean)
+                    (o.innerText || '').split('\n').map(cut).filter(Boolean)
                         .forEach(t => lines.push(t));
                 // 日付らしい文字を持ち、かつ子を持たない要素（＝札や表示欄）
                 const re = /\d{4}\s*[年\/-]\s*\d{1,2}|\d{1,2}\s*月|開始|終了|から|まで/;

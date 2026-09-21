@@ -26,6 +26,19 @@ jobs:
         run: |
           pip install playwright gspread google-auth pandas pyyaml
           python -m playwright install --with-deps chromium
+      - name: test
+        id: test
+        # ⚠️ **画面を触る前に通す。** page.evaluate に渡すJSは文字列なので、
+        # 壊れていても import は通りテストも緑になる。壊れたと分かるのは
+        # 本番で画面を触った瞬間で、そこまで十数分かかるうえ、短時間に何度も
+        # 流すとOTPが弾かれる。実際 2026-09-21 に1回まるごと無駄にした。
+        # ここは数秒で、ブラウザにもネットワークにも触らない。
+        run: |
+          for f in tests/test_*.py; do
+            echo "== $f"
+            python "$f" || exit 1
+          done
+
       - name: dinii
         # 埋め戻し（範囲・複数月）は新Uレジ側だけの機能。ダイニーは単月しか
         # 解さないので、範囲を渡すとそのまま「対象月」として扱われてしまう。
@@ -41,7 +54,9 @@ jobs:
           POS_DIAG_FILES: ${{ github.event.inputs.diag_files }}
         run: python dinii_sync.py "${{ github.event.inputs.month }}"
       - name: uleji
-        if: always()
+        # ダイニーが落ちても走らせる（always）。ただし**テストが落ちたときは走らせない**
+        # ——always() だけだと、画面を触るJSが壊れていても本番へ進んでしまう。
+        if: always() && steps.test.outcome == 'success'
         env:
           ULEJI_LOGIN_URL: ${{ secrets.ULEJI_LOGIN_URL }}
           ULEJI_COMPANY: ${{ secrets.ULEJI_COMPANY }}
