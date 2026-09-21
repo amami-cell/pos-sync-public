@@ -154,7 +154,15 @@ def parse_csv_bytes(data: bytes, encodings=ENCODINGS) -> list[dict]:
                     r.setdefault("_source_file", n)
                 rows.extend(part)
         if not rows:
-            raise ValueError("ZIPの中にCSVが見つかりませんでした")
+            # **「CSVが無い」と「CSVはあるが空」は原因が違う。** 前者は
+            # 落とすものを間違えている（導線の不具合）、後者はその月に
+            # データが無いだけ。同じ文言で出すと調査が空回りする。
+            csvs = [n for n in names if n.lower().endswith(".csv")]
+            if csvs:
+                raise ValueError(
+                    f"ZIPの中のCSVが空でした（{len(csvs)}ファイル・0行）。"
+                    "その月のデータが無い可能性があります")
+            raise ValueError(f"ZIPの中にCSVが見つかりませんでした（{len(names)}ファイル）")
         return rows
     if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
         return _decode_csv(data, ("utf-16",) + encodings)
