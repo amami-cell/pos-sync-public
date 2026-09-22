@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       month:
-        description: '対象月。YYYY-MM / 範囲 2026-05:2026-08 / とびとび 2026-05,2026-08（空なら先月）'
+        description: '対象月。YYYY-MM / 範囲 2026-05:2026-08 / とびとび 2026-05,2026-08（空なら先月）。※手動で流すときは前回から30分以上あけること（OTPが弾かれます）'
         required: false
       diag:
         description: '診断モード（画面構造をログに出力。導線確定用）: 1 で有効'
