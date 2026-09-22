@@ -995,11 +995,17 @@ def _nav_candidates(page, idx: int) -> list[str]:
                 const use = named.length ? named : all;
                 const picked = [], seen = new Set();
                 for (const el of use) {
-                    // 押せる器まで2段だけ上がる（見つからなければ本人を押す）
+                    // 押せる器まで2段だけ上がる（見つからなければ本人を押す）。
+                    // ⚠️ **他の候補を巻き込む祖先までは上がらない。** 実測
+                    // （2026-09-22）で前と次の svg は同じ親 div.text-center を
+                    // 持っており、そこまで上がったせいで**2つが1つに潰れ**、
+                    // 「候補が尽きた」で止まった。前と次を別物として残す。
                     let t = el;
                     for (let i = 0; i < 2 && t.parentElement; i++) {
                         if (t.tagName === 'BUTTON' || /v-btn/.test(cls(t))) break;
-                        t = t.parentElement;
+                        const p = t.parentElement;
+                        if (use.filter(o => p.contains(o)).length > 1) break;
+                        t = p;
                     }
                     if (seen.has(t)) continue;
                     seen.add(t);
@@ -1101,22 +1107,38 @@ def _goto_month(page, idx: int, ym: str) -> bool:
 
 
 def _click_leaf_in_box(page, idx: int, text: str) -> bool:
-    """枠の中の、その文字ちょうどの葉要素を押す。**1件に絞れなければ押さない。**"""
+    """枠の**見出しの中**の、その文字ちょうどの葉要素を押す。
+
+    **1件に絞れなければ押さない。**
+
+    ⚠️ **見出しの数字と日のマスを取り違えない。** 実測（2026-09-22）で
+    見出しの月『9』を押そうとしたら **9日のマスと衝突して2件**になり、
+    押せなかった。`9月` の見出しと `9日` のマスは同じ文字。
+    **曜日が出そろう前（＝見出しの区間）だけ**を見る。
+    日のマスを月と間違えて押すと、**別の日付が選ばれたまま先へ進む**。
+    """
     try:
         n = page.evaluate(
-            r"""([idx, text]) => {
+            r"""([idx, text, wd]) => {
                 document.querySelectorAll('[data-claude-leaf]')
                     .forEach(e => e.removeAttribute('data-claude-leaf'));
                 const box = document.querySelector(`[data-claude-cal='${idx}']`);
                 if (box === null) return -1;
                 const vis = el => el.offsetParent !== null
                                   || getComputedStyle(el).position === 'fixed';
-                const hit = [...box.querySelectorAll('*')]
-                    .filter(el => !el.children.length).filter(vis)
-                    .filter(el => (el.textContent || '').trim() === text);
+                const seen = new Set();
+                const hit = [];
+                for (const el of box.querySelectorAll('*')) {
+                    if (el.children.length || !vis(el)) continue;
+                    const t = (el.textContent || '').trim();
+                    // 曜日が出そろったら、そこから先は日のマス。見出しではない。
+                    if (seen.size >= wd.length) break;
+                    if (wd.includes(t)) { seen.add(t); continue; }
+                    if (t === text) hit.push(el);
+                }
                 if (hit.length === 1) hit[0].setAttribute('data-claude-leaf', '1');
                 return hit.length;
-            }""", [idx, text])
+            }""", [idx, text, list(WEEKDAYS)])
     except Exception as e:
         _note(f"[PL期間] 『{text}』を探せなかった: {type(e).__name__}: {e}")
         return False
