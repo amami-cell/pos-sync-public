@@ -1056,14 +1056,17 @@ def _goto_month(page, idx: int, ym: str) -> bool:
             # 枠の中身を出す（実行1回に30分の間隔が要るので、空振りさせない）。
             _note("[PL期間] 月送りらしきものが枠の中に無い。枠の中身を出す")
             _dump_box(page, idx)
-            return False
+            # 送るボタンが無い形かもしれない。見出しの年／月を押す経路を試す。
+            return _try_month_list(page, idx, ym)
         need = "next" if steps > 0 else "prev"
         want = role.get(need)
         if want is None:
             free = [c for c in cands if c not in dead and c not in role.values()]
             if not free:
                 _note(f"[PL期間] {need} に使える候補が尽きた（候補: {', '.join(cands)}）")
-                return False
+                _dump_box(page, idx)
+                # どれも月を動かさなかった。押して一覧が出る形を試す。
+                return _try_month_list(page, idx, ym)
             want = free[0]
             _note(f"[PL期間] {need} はどれか不明。{want} を押して確かめる")
         if want not in cands:
@@ -1095,6 +1098,73 @@ def _goto_month(page, idx: int, ym: str) -> bool:
         header = now
     _note(f"[PL期間] {MAX_MONTH_STEPS}回送っても {ym} に着かなかった")
     return False
+
+
+def _click_leaf_in_box(page, idx: int, text: str) -> bool:
+    """枠の中の、その文字ちょうどの葉要素を押す。**1件に絞れなければ押さない。**"""
+    try:
+        n = page.evaluate(
+            r"""([idx, text]) => {
+                document.querySelectorAll('[data-claude-leaf]')
+                    .forEach(e => e.removeAttribute('data-claude-leaf'));
+                const box = document.querySelector(`[data-claude-cal='${idx}']`);
+                if (box === null) return -1;
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const hit = [...box.querySelectorAll('*')]
+                    .filter(el => !el.children.length).filter(vis)
+                    .filter(el => (el.textContent || '').trim() === text);
+                if (hit.length === 1) hit[0].setAttribute('data-claude-leaf', '1');
+                return hit.length;
+            }""", [idx, text])
+    except Exception as e:
+        _note(f"[PL期間] 『{text}』を探せなかった: {type(e).__name__}: {e}")
+        return False
+    if n != 1:
+        _note(f"[PL期間] 枠の中の『{text}』が {n}件。1件に絞れないので押さない")
+        return False
+    try:
+        page.locator("[data-claude-leaf='1']").first.click(timeout=5000)
+    except Exception as e:
+        _note(f"[PL期間] 『{text}』を押せなかった: {type(e).__name__}")
+        return False
+    page.wait_for_timeout(1500)
+    return True
+
+
+def _try_month_list(page, idx: int, ym: str) -> bool:
+    """見出しの年／月を押すと一覧が出る作りを試す。着いたかを返す。
+
+    月送りのボタンが無い（あるいは効かない）カレンダーの、もうひとつの形。
+    **`2026` や `9` そのものが押せて、年や月の一覧が出る**ことがある。
+
+    ⚠️ **押した中身は必ず出す。** 実行1回に30分の間隔が要るので、外れたときも
+    形が分かるようにしておく。当たったかどうかは最後に見出しを読み直して決める。
+    """
+    cur = _calendar_header(page, idx)
+    if cur is None:
+        return False
+    pairs = ((str(int(cur[:4])), str(int(ym[:4])), "年"),
+             (str(int(cur[5:7])), str(int(ym[5:7])), "月"))
+    touched = False
+    for now_t, want_t, what in pairs:
+        if now_t == want_t:
+            continue
+        _note(f"[PL期間] 見出しの{what}『{now_t}』を押して一覧が出るか試す")
+        if not _click_leaf_in_box(page, idx, now_t):
+            return False
+        touched = True
+        _dump_open_picker_text(page)
+        if not _click_menu_item(page, want_t):
+            _note(f"[PL期間] 一覧に『{want_t}』が無い")
+            return False
+        if not _mark_calendars(page):
+            return False
+    if not touched:
+        return False
+    now = _calendar_header(page, idx)
+    _note(f"[PL期間] 一覧で選んだあとの見出し: {now}")
+    return now == ym
 
 
 def _dump_box(page, idx: int):
