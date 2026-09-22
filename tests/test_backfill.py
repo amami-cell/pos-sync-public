@@ -78,6 +78,14 @@ def test_年月を読む():
         assert parse_month_header(t) == "2026-09", t
 
 
+def test_見出しが要素に割れていても読む():
+    # 実測（2026-09-22）では `2026` `年` `9` `月` が別々の要素だった。
+    # 行ごとに渡すとどれも年月として読めない。つなげてから渡す前提で、
+    # 空白や改行が混ざっても読めること。
+    for t in ["2026 年 9 月", "2026\n年\n9\n月", "開始日 2026 年 9 月"]:
+        assert parse_month_header(t) == "2026-09", repr(t)
+
+
 def test_英語の月名も読む():
     # Vuetify の既定ロケールが英語のことがある
     assert parse_month_header("September 2026") == "2026-09"
