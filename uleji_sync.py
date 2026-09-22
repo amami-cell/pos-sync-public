@@ -1033,55 +1033,100 @@ def _goto_month(page, idx: int, ym: str) -> bool:
     return False
 
 
-def _click_day(page, idx: int, day: str) -> bool:
-    """idx番目のカレンダーの日のマスを押す。**隣の月の埋めマスは押さない。**
+def day_cell_index(cells: list[str], day: int, last_day: int) -> int | None:
+    """カレンダーのマスの並びから、その月の `day` 日が何番目かを返す。無理なら None。
 
-    ⚠️ 実測の並びは `30 31 1 2 3 …`。**先頭の 30/31 は前の月**。
-    ただ「1」を拾うと取り違えるので、選べないマス・隣月のマスを外す。
-    それでも見分けがつかないときは、**同じ文字のマスが複数あれば押さない**
-    （当てずっぽうで押すと、間違った月のCSVが対象月として落ちる）。"""
+    ⚠️ **class で隣の月を見分けようとしない。** 実測の並びは
+    `30 31 1 2 3 …` で、**先頭は前の月の尻**。さらに月末のうしろには
+    **翌月の頭**が並ぶので、`1` は当月と翌月で2回出る。class に
+    `adjacent` のような目印が無い作りだと、これを見分けられない。
+
+    **並びで決まる。** 前の月の尻は必ず月末側の数字（22〜31）で、
+    **1 で始まることはない**。だから
+
+        最初に出てくる「1」＝ 当月の1日
+
+    で確定する。あとは日が連続しているので `1日の位置 + day - 1`。
+
+    ⚠️ **必ず答え合わせをする。** その位置の文字が本当に `day` か、
+    月末日も同じ数え方で合うかを見る。合わなければ None を返して
+    **押さない**。当てずっぽうで押すと、間違った月のCSVが対象月として落ちる。
+    """
+    if not (1 <= day <= last_day):
+        return None
     try:
-        got = page.evaluate(
-            r"""([idx, day]) => {
-                document.querySelectorAll('[data-claude-day]')
-                    .forEach(e => e.removeAttribute('data-claude-day'));
+        start = cells.index("1")
+    except ValueError:
+        return None
+    idx = start + day - 1
+    last_idx = start + last_day - 1
+    if idx >= len(cells) or last_idx >= len(cells):
+        return None
+    if cells[idx] != str(day) or cells[last_idx] != str(last_day):
+        return None
+    return idx
+
+
+def _day_cells(page, idx: int) -> list[str]:
+    """idx番目のカレンダーの日のマスを**並び順のまま**取り、印をつける。
+
+    ⚠️ **曜日の見出しより前の数字を拾わない。** 見出しには `2026` と `9` が
+    別々の要素で入っており、`9` は1〜2桁なのでマスと区別がつかない。
+    日月火水木金土が出そろったあとから数え始める。
+
+    ⚠️ **空のマスも数に入れる。** 月初の前を空欄で埋める作りだと、
+    抜かすと位置が1つずつずれる。
+    """
+    try:
+        cells = page.evaluate(
+            r"""([idx, wd]) => {
+                document.querySelectorAll('[data-claude-cell]')
+                    .forEach(e => e.removeAttribute('data-claude-cell'));
                 const box = document.querySelector(`[data-claude-cal='${idx}']`);
-                if (!box) return { n: 0, why: 'カレンダーの印が消えている' };
+                if (!box) return null;
                 const vis = el => el.offsetParent !== null
                                   || getComputedStyle(el).position === 'fixed';
-                const bad = /adjacent|outside|other-?month|sibling|disabled|muted|grey|gray/i;
-                const cells = [...box.querySelectorAll(
-                    'button, [role=gridcell], [role=option], td, div, span')]
-                    .filter(vis)
-                    .filter(el => !el.children.length)
-                    .filter(el => (el.textContent || '').trim() === day)
-                    .filter(el => {
-                        for (let t = el, i = 0; t && i < 3; t = t.parentElement, i++) {
-                            if (bad.test(String(t.className || ''))) return false;
-                            if (t.disabled
-                                || t.getAttribute('aria-disabled') === 'true') return false;
-                        }
-                        return true;
-                    });
-                if (cells.length === 1) {
-                    cells[0].setAttribute('data-claude-day', '1');
-                    return { n: 1 };
+                const leaves = [...box.querySelectorAll('*')]
+                    .filter(el => !el.children.length).filter(vis);
+                const seen = new Set();
+                const out = [];
+                let started = false;
+                for (const el of leaves) {
+                    const t = (el.textContent || '').trim();
+                    if (!started) {
+                        if (wd.includes(t)) seen.add(t);
+                        if (seen.size >= wd.length) started = true;
+                        continue;
+                    }
+                    if (t && !/^\d{1,2}$/.test(t)) continue;   // 見出しや注記は飛ばす
+                    el.setAttribute('data-claude-cell', String(out.length + 1));
+                    out.push(t);
                 }
-                return { n: cells.length };
-            }""", [idx, day])
+                return out;
+            }""", [idx, list(WEEKDAYS)])
     except Exception as e:
-        _note(f"[PL期間] {day}日を探せなかった: {type(e).__name__}: {e}")
+        _note(f"[PL期間] 日のマスを読めなかった: {type(e).__name__}: {e}")
+        return []
+    if cells is None:
+        _note("[PL期間] カレンダーの印が消えている")
+        return []
+    return cells
+
+
+def _click_day(page, idx: int, day: int, last_day: int) -> bool:
+    """idx番目のカレンダーの `day` 日を押す。押せたかを返す。"""
+    cells = _day_cells(page, idx)
+    if not cells:
+        _note("[PL期間] 日のマスが1つも取れない")
         return False
-    if got.get("why"):
-        _note(f"[PL期間] {got['why']}")
+    pos = day_cell_index(cells, day, last_day)
+    if pos is None:
+        _note(f"[PL期間] {day}日の位置を決められない（マス {len(cells)}個: "
+              f"{' '.join(c or '_' for c in cells[:12])} …）。押さない")
         return False
-    if got["n"] != 1:
-        # 0件なら見つからない。2件以上なら前後の月のマスと区別がついていない。
-        # **どちらも押さない。**
-        _note(f"[PL期間] {day}日のマスが {got['n']}件。1件に絞れないので押さない")
-        return False
+    _note(f"[PL期間] {day}日は {pos + 1}番目のマス（全{len(cells)}個）")
     try:
-        page.locator("[data-claude-day='1']").first.click(timeout=5000)
+        page.locator(f"[data-claude-cell='{pos + 1}']").first.click(timeout=5000)
     except Exception as e:
         _note(f"[PL期間] {day}日を押せなかった: {type(e).__name__}")
         return False
@@ -1100,11 +1145,11 @@ def _calendar_pick(page, ym: str) -> bool:
     if not n:
         return False
     last_day = int(_month_range_iso(ym)[1][-2:])
-    plan = [(1, "1"), (2 if n > 1 else 1, str(last_day))]
+    plan = [(1, 1), (2 if n > 1 else 1, last_day)]
     for idx, day in plan:
         if not _goto_month(page, idx, ym):
             return False
-        if not _click_day(page, idx, day):
+        if not _click_day(page, idx, day, last_day):
             return False
         # 押すと再描画されることがあるので、印を取り直す
         if not _mark_calendars(page):
