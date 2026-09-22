@@ -858,116 +858,143 @@ def _fill_range_inputs(page, ym: str) -> bool:
     return True
 
 
-def _calendar_header(page) -> str | None:
-    """開いているカレンダーの見出し（年月）。読めなければ None。"""
+WEEKDAYS = ("日", "月", "火", "水", "木", "金", "土")
+
+# 送るボタンの見分け。**文字が無いアイコンのことがある**ので、
+# aria-label だけでなく class（mdi-chevron-left / arrow-right など）も見る。
+_NEXT_PAT = r"next|forward|right|chevron.?right|arrow.?right|翌|次|›|▶|❯|＞"
+_PREV_PAT = r"prev|previous|back|left|chevron.?left|arrow.?left|前|‹|◀|❮|＜"
+
+
+def _mark_calendars(page) -> int:
+    """「開始日」「終了日」のカレンダーに印をつけて、見つけた数を返す。
+
+    ⚠️ **class で探さない。** 実測（2026-09-22）では
+    `.v-date-picker` も `.v-picker` も `[role=grid]` も無く、
+    `カレンダーらしき器: なし` と出た。**中身で見分ける**しかない。
+
+    決め手は「開始日 / 終了日」の札と、**曜日の並び（日月火水木金土）＋
+    日のマスが15個以上**あること。札から祖先をたどって、最初にその条件を
+    満たした器をカレンダーとみなす。
+
+    ⚠️ **祖先をたどりすぎない。** 8段で打ち切る。青天井にすると
+    ダイアログ全体を掴んでしまい、開始日と終了日の区別が消える
+    （前に別の場所で5段上がって行全体を押した失敗がある）。
+    """
+    try:
+        n = page.evaluate(
+            r"""([labels, wd]) => {
+                document.querySelectorAll('[data-claude-cal]')
+                    .forEach(e => e.removeAttribute('data-claude-cal'));
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const looksCal = el => {
+                    const t = el.innerText || '';
+                    const days = (t.match(/\d{1,2}/g) || []).length;
+                    const n = wd.filter(c => t.includes(c)).length;
+                    return days >= 15 && n >= 6;
+                };
+                const boxes = [];
+                for (const want of labels) {
+                    let lab = null;
+                    for (const el of document.querySelectorAll('*')) {
+                        if (el.children.length) continue;
+                        if ((el.textContent || '').trim() !== want) continue;
+                        if (!vis(el)) continue;
+                        lab = el; break;
+                    }
+                    if (!lab) continue;
+                    let t = lab.parentElement, box = null;
+                    for (let i = 0; i < 8 && t; i++, t = t.parentElement)
+                        if (looksCal(t)) { box = t; break; }
+                    if (box && !boxes.includes(box)) boxes.push(box);
+                }
+                boxes.forEach((b, i) => b.setAttribute('data-claude-cal', String(i + 1)));
+                return boxes.length;
+            }""", [["開始日", "終了日"], list(WEEKDAYS)])
+    except Exception as e:
+        _note(f"[PL期間] カレンダーを探せなかった: {type(e).__name__}: {e}")
+        return 0
+    if n:
+        _note(f"[PL期間] カレンダーの枠を {n}件みつけた"
+              + ("（開始日と終了日が同じ器）" if n == 1 else "（開始日・終了日）"))
+    else:
+        _note("[PL期間] 開始日／終了日のカレンダーが見つからない")
+    return n
+
+
+def _calendar_header(page, idx: int) -> str | None:
+    """idx番目のカレンダーの見出し（年月）。読めなければ None。
+
+    ⚠️ **見出しは要素が割れている。** 実測では `2026` `年` `9` `月` が
+    別々の要素で、行ごとに渡すと `2026` / `年` / `9` / `月` になり
+    どれも年月として読めない。**器ごとの文字をつなげてから**読む。
+
+    ⚠️ **いちばん短い当たりを採る。** 器全体の文字でも年月は読めるが、
+    そこには日のマスも混ざる。短いものほど見出しそのものに近い。
+    """
     try:
         texts = page.evaluate(
-            r"""(sel) => {
-                const cut = s => (s || '').toString().trim().replace(/\s+/g, ' ').slice(0, 40);
-                const vis = el => el.offsetParent !== null
-                                  || getComputedStyle(el).position === 'fixed';
-                const ov = [...document.querySelectorAll(sel)].filter(vis);
-                const out = [];
-                for (const o of ov) {
-                    o.querySelectorAll(
-                        '.v-date-picker-controls, .v-date-picker-header, '
-                        + '[class*=picker-header], [class*=picker-controls], '
-                        + '[class*=calendar-header], [class*=month-btn], '
-                        + '[class*=month-year]'
-                    ).forEach(h => out.push(cut(h.innerText)));
+            r"""(idx) => {
+                const box = document.querySelector(`[data-claude-cal='${idx}']`);
+                if (!box) return [];
+                const cut = s => (s || '').toString().trim().replace(/\s+/g, ' ');
+                const out = [cut(box.innerText)];
+                for (const el of box.querySelectorAll('*')) {
+                    const t = cut(el.innerText);
+                    if (t && t.length <= 40) out.push(t);
                 }
-                // 見出しの器が分からないときのために、器の中の短い行も渡す
-                for (const o of ov)
-                    (o.innerText || '').split('\n').map(cut)
-                        .filter(t => t && t.length <= 20).slice(0, 12)
-                        .forEach(t => out.push(t));
-                return [...new Set(out)].filter(Boolean).slice(0, 24);
-            }""", _OVERLAY_SEL)
+                return [...new Set(out)];
+            }""", idx)
     except Exception as e:
-        _note(f"[PL期間] カレンダーの見出しを読めなかった: {type(e).__name__}: {e}")
+        _note(f"[PL期間] 見出しを読めなかった: {type(e).__name__}: {e}")
         return None
-    for t in texts or []:
-        ym = parse_month_header(t)
-        if ym:
-            return ym
-    return None
+    hits = [(len(t), parse_month_header(t)) for t in texts or []]
+    hits = sorted((n, ym) for n, ym in hits if ym)
+    return hits[0][1] if hits else None
 
 
-def _calendar_pick(page, ym: str) -> bool:
-    """カレンダーなら、対象月まで送ってから 1日 と 月末日 を押す。押せたかを返す。
+def _calendar_step(page, idx: int, forward: bool) -> bool:
+    """idx番目のカレンダーをひと月ぶん送る。押せたかを返す。
 
-    ⚠️ **送る回数は画面の見出しから決める**（`month_steps`）。今日から
-    逆算すると、ランナーはUTC・画面はJSTなので月初の数時間だけひと月ずれる。
-
-    ⚠️ **隣の月のマスを押さない。** カレンダーは月初の前と月末の後に隣の月の
-    日を並べる。ただ「1」を拾うと**翌月の1日**を押しうる。adjacent / outside /
-    other-month / disabled を外す。
-    """
-    header = _calendar_header(page)
-    if header is None:
-        _note("[PL期間] カレンダーの見出しが見つからない（カレンダーではない？）")
-        return False
-    _note(f"[PL期間] カレンダーの見出し: {header} → 目標 {ym}")
-    for _ in range(MAX_MONTH_STEPS + 1):
-        steps = month_steps(header, ym)
-        if steps == 0:
-            break
-        if abs(steps) > MAX_MONTH_STEPS:
-            _note(f"[PL期間] {abs(steps)}か月も離れている。見出しの読み違いとみて中止")
-            return False
-        if not _calendar_step(page, forward=steps > 0):
-            return False
-        nxt = _calendar_header(page)
-        if nxt is None or nxt == header:
-            _note(f"[PL期間] 送ったのに見出しが {header} のまま。これ以上進めない")
-            return False
-        header = nxt
-    else:
-        _note(f"[PL期間] {MAX_MONTH_STEPS}回送っても {ym} に着かなかった")
-        return False
-    _note(f"[PL期間] {header} まで送った")
-
-    # マスの文字はゼロ埋めされない（"01" ではなく "1"）
-    last_day = int(_month_range_iso(ym)[1][-2:])
-    for label in ("1", str(last_day)):
-        if not _click_day(page, label):
-            _note(f"[PL期間] {label}日のマスを押せなかった")
-            return False
-    page.wait_for_timeout(1500)
-    return True
-
-
-def _calendar_step(page, forward: bool) -> bool:
-    """カレンダーをひと月ぶん送る。押せたかを返す。"""
+    ⚠️ **文字の無いアイコンのことがある。** 実測の「中の押せるもの」には
+    送るボタンが1つも出てこなかった（`innerText || aria-label` が空で
+    振るい落とされていた）。class も見る。"""
     try:
         ok = page.evaluate(
-            r"""([sel, forward]) => {
+            r"""([idx, pat, anti]) => {
                 document.querySelectorAll('[data-claude-nav]')
                     .forEach(e => e.removeAttribute('data-claude-nav'));
+                const box = document.querySelector(`[data-claude-cal='${idx}']`);
+                if (!box) return 'カレンダーの印が消えている';
                 const vis = el => el.offsetParent !== null
                                   || getComputedStyle(el).position === 'fixed';
-                const want = forward ? /next|forward|右|翌|>|›|▶|❯/
-                                     : /prev|previous|back|左|前|<|‹|◀|❮/;
-                const other = forward ? /prev|previous|back|‹|◀|❮/
-                                      : /next|forward|›|▶|❯/;
-                const ov = [...document.querySelectorAll(sel)].filter(vis);
-                const btns = ov.flatMap(o => [...o.querySelectorAll(
-                    'button, [role=button], i, .v-btn')]).filter(vis);
-                for (const b of btns) {
-                    const hay = [b.getAttribute('aria-label'), b.className,
-                                 b.getAttribute('title'), b.innerText]
-                        .map(x => String(x || '')).join(' ');
+                const want = new RegExp(pat, 'i'), other = new RegExp(anti, 'i');
+                const cand = [...box.querySelectorAll(
+                    'button, [role=button], .v-btn, i, svg, [class*=icon]')]
+                    .filter(vis);
+                for (const b of cand) {
+                    const hay = [b.getAttribute('aria-label'), b.getAttribute('title'),
+                                 b.className, b.innerText]
+                        .map(x => String(x && x.baseVal !== undefined
+                                         ? x.baseVal : (x || ''))).join(' ');
                     if (!want.test(hay) || other.test(hay)) continue;
-                    b.setAttribute('data-claude-nav', '1');
-                    return true;
+                    // 押せる器（button / v-btn）まで2段だけ上がる
+                    let t = b;
+                    for (let i = 0; i < 2 && t; i++, t = t.parentElement)
+                        if (t.tagName === 'BUTTON'
+                            || /v-btn/.test(String(t.className || ''))) break;
+                    (t || b).setAttribute('data-claude-nav', '1');
+                    return '';
                 }
-                return false;
-            }""", [_OVERLAY_SEL, forward])
+                return '送るボタンらしきものが無い';
+            }""", [idx, _NEXT_PAT if forward else _PREV_PAT,
+                   _PREV_PAT if forward else _NEXT_PAT])
     except Exception as e:
         _note(f"[PL期間] 送るボタンを探せなかった: {type(e).__name__}: {e}")
         return False
-    if not ok:
-        _note(f"[PL期間] {'次' if forward else '前'}の月へ送るボタンが無い")
+    if ok:
+        _note(f"[PL期間] {'次' if forward else '前'}の月へ: {ok}")
         return False
     try:
         page.locator("[data-claude-nav='1']").first.click(timeout=5000)
@@ -978,36 +1005,80 @@ def _calendar_step(page, forward: bool) -> bool:
     return True
 
 
-def _click_day(page, day: str) -> bool:
-    """カレンダーの日のマスを押す。**隣の月の埋めマスは押さない。**"""
+def _goto_month(page, idx: int, ym: str) -> bool:
+    """idx番目のカレンダーを対象月まで送る。着いたかを返す。"""
+    header = _calendar_header(page, idx)
+    if header is None:
+        _note(f"[PL期間] {idx}番目のカレンダーの見出しが読めない")
+        return False
+    _note(f"[PL期間] {idx}番目のカレンダー: {header} → 目標 {ym}")
+    for _ in range(MAX_MONTH_STEPS + 1):
+        steps = month_steps(header, ym)
+        if steps == 0:
+            return True
+        if abs(steps) > MAX_MONTH_STEPS:
+            _note(f"[PL期間] {abs(steps)}か月も離れている。見出しの読み違いとみて中止")
+            return False
+        if not _calendar_step(page, idx, forward=steps > 0):
+            return False
+        # 送ったあとは印がつけ直される作りかもしれないので、取り直す
+        if not _mark_calendars(page):
+            return False
+        nxt = _calendar_header(page, idx)
+        if nxt is None or nxt == header:
+            _note(f"[PL期間] 送ったのに見出しが {header} のまま。これ以上進めない")
+            return False
+        header = nxt
+    _note(f"[PL期間] {MAX_MONTH_STEPS}回送っても {ym} に着かなかった")
+    return False
+
+
+def _click_day(page, idx: int, day: str) -> bool:
+    """idx番目のカレンダーの日のマスを押す。**隣の月の埋めマスは押さない。**
+
+    ⚠️ 実測の並びは `30 31 1 2 3 …`。**先頭の 30/31 は前の月**。
+    ただ「1」を拾うと取り違えるので、選べないマス・隣月のマスを外す。
+    それでも見分けがつかないときは、**同じ文字のマスが複数あれば押さない**
+    （当てずっぽうで押すと、間違った月のCSVが対象月として落ちる）。"""
     try:
-        ok = page.evaluate(
-            r"""([sel, day]) => {
+        got = page.evaluate(
+            r"""([idx, day]) => {
                 document.querySelectorAll('[data-claude-day]')
                     .forEach(e => e.removeAttribute('data-claude-day'));
+                const box = document.querySelector(`[data-claude-cal='${idx}']`);
+                if (!box) return { n: 0, why: 'カレンダーの印が消えている' };
                 const vis = el => el.offsetParent !== null
                                   || getComputedStyle(el).position === 'fixed';
-                // 隣の月の埋め・選べないマスを外す。ここを外さないと
-                // 「1」で翌月の1日を押してしまう。
-                const bad = /adjacent|outside|other-?month|sibling|disabled|hide/i;
-                const ov = [...document.querySelectorAll(sel)].filter(vis);
-                const cells = ov.flatMap(o => [...o.querySelectorAll(
-                    'button, [role=gridcell], [role=option], td')])
+                const bad = /adjacent|outside|other-?month|sibling|disabled|muted|grey|gray/i;
+                const cells = [...box.querySelectorAll(
+                    'button, [role=gridcell], [role=option], td, div, span')]
                     .filter(vis)
-                    .filter(el => !bad.test(String(el.className || ''))
-                                  && !bad.test(String(
-                                      (el.parentElement || {}).className || ''))
-                                  && !el.disabled
-                                  && el.getAttribute('aria-disabled') !== 'true')
-                    .filter(el => (el.innerText || '').trim() === day);
-                if (!cells.length) return false;
-                cells[0].setAttribute('data-claude-day', '1');
-                return true;
-            }""", [_OVERLAY_SEL, day])
+                    .filter(el => !el.children.length)
+                    .filter(el => (el.textContent || '').trim() === day)
+                    .filter(el => {
+                        for (let t = el, i = 0; t && i < 3; t = t.parentElement, i++) {
+                            if (bad.test(String(t.className || ''))) return false;
+                            if (t.disabled
+                                || t.getAttribute('aria-disabled') === 'true') return false;
+                        }
+                        return true;
+                    });
+                if (cells.length === 1) {
+                    cells[0].setAttribute('data-claude-day', '1');
+                    return { n: 1 };
+                }
+                return { n: cells.length };
+            }""", [idx, day])
     except Exception as e:
         _note(f"[PL期間] {day}日を探せなかった: {type(e).__name__}: {e}")
         return False
-    if not ok:
+    if got.get("why"):
+        _note(f"[PL期間] {got['why']}")
+        return False
+    if got["n"] != 1:
+        # 0件なら見つからない。2件以上なら前後の月のマスと区別がついていない。
+        # **どちらも押さない。**
+        _note(f"[PL期間] {day}日のマスが {got['n']}件。1件に絞れないので押さない")
         return False
     try:
         page.locator("[data-claude-day='1']").first.click(timeout=5000)
@@ -1015,6 +1086,29 @@ def _click_day(page, day: str) -> bool:
         _note(f"[PL期間] {day}日を押せなかった: {type(e).__name__}")
         return False
     page.wait_for_timeout(1200)
+    return True
+
+
+def _calendar_pick(page, ym: str) -> bool:
+    """カレンダーから月初〜月末を選ぶ。押せたかを返す。
+
+    開始日と終了日で枠が分かれていれば、それぞれを対象月まで送ってから
+    1日 / 月末日 を押す。1つの枠で兼ねている作りなら、同じ枠で2回押す
+    （範囲選択は「開始→終了」の順に押す作りが普通）。
+    """
+    n = _mark_calendars(page)
+    if not n:
+        return False
+    last_day = int(_month_range_iso(ym)[1][-2:])
+    plan = [(1, "1"), (2 if n > 1 else 1, str(last_day))]
+    for idx, day in plan:
+        if not _goto_month(page, idx, ym):
+            return False
+        if not _click_day(page, idx, day):
+            return False
+        # 押すと再描画されることがあるので、印を取り直す
+        if not _mark_calendars(page):
+            return False
     return True
 
 
@@ -1133,7 +1227,9 @@ def _dump_open_picker_text(page):
                             marks.push(el.tagName.toLowerCase() + '	'
                                        + cut(el.className) + '	' + t);
                     }
-                return { lines: [...new Set(lines)].slice(0, 40),
+                // ⚠️ 40行では足りなかった。終了日のカレンダーが切れて、
+                // 枠が2つあることに気づけなかった。
+                return { lines: [...new Set(lines)].slice(0, 120),
                          marks: [...new Set(marks)].slice(0, 20) };
             }""", _OVERLAY_SEL)
     except Exception as e:
@@ -1145,6 +1241,45 @@ def _dump_open_picker_text(page):
     _note(f"[PL期間] 日付・開始終了らしき札 {len(info['marks'])}件:")
     for t in info["marks"]:
         _note(f"      * {t}")
+    _dump_icon_buttons(page)
+
+
+def _dump_icon_buttons(page):
+    """**文字を持たない押せるもの**（アイコン）を class ごと出す。
+
+    ⚠️ **これが見えていなかった。** 「中の押せるもの」は
+    `innerText || aria-label` で拾っており、**どちらも空のアイコンは
+    丸ごと振るい落とされていた**。カレンダーを送る ◀ ▶ はまさにこれで、
+    実測（2026-09-22）の一覧には1つも出てこなかった。
+    「送るボタンが無い」のではなく「見ていなかった」。"""
+    try:
+        items = page.evaluate(
+            r"""(sel) => {
+                const cut = s => (s || '').toString().trim()
+                    .replace(/\s+/g, ' ').slice(0, 50);
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const ov = [...document.querySelectorAll(sel)].filter(vis);
+                const out = [];
+                for (const o of ov)
+                    for (const b of o.querySelectorAll(
+                            'button, [role=button], .v-btn, i, svg, [class*=icon]')) {
+                        if (!vis(b)) continue;
+                        if ((b.innerText || '').trim()) continue;   // 文字があるものは別で出ている
+                        const cls = b.className;
+                        out.push([b.tagName.toLowerCase(),
+                                  cut(cls && cls.baseVal !== undefined ? cls.baseVal : cls),
+                                  cut(b.getAttribute('aria-label')),
+                                  cut(b.getAttribute('title'))].join('	'));
+                    }
+                return [...new Set(out)].slice(0, 25);
+            }""", _OVERLAY_SEL)
+    except Exception as e:
+        _note(f"[PL期間] アイコンを読めなかった: {type(e).__name__}: {e}")
+        return
+    _note(f"[PL期間] 文字の無い押せるもの（アイコン） {len(items)}件:")
+    for t in items:
+        _note(f"      + {t}")
 
 
 def _period_probe(page, label: str):
