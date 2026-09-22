@@ -227,6 +227,37 @@ def write_local_csv(rows: list[dict], path: str):
 # ---- 出力2: Googleスプレッドに追記（gspread / サービスアカウント）----
 # 注意: infomart-botサービスアカウントはDrive容量枯渇の既知課題あり。
 #   対策: 書込先スプレッドを個人アカ所有にして共有編集権を付与 / 別SAを使う 等。
+def row_key(r: dict) -> tuple:
+    """行の同一性は (年月, 店舗名, POS)。店舗名は表記ゆれを吸収する。
+
+    ⚠️ **年月は文字で比べる。** シートから読むと `2026-07` は文字のままだが、
+    `202607` のような書き方をすると数値で返る。型が違うだけで別行とみなされ、
+    **同じ月が二重に並ぶ。**"""
+    return (str(r.get("年月", "")).strip(),
+            norm_name(r.get("店舗名", "")),
+            str(r.get("POS", "")).strip())
+
+
+def keep_rows(existing: list[dict], rows: list[dict]) -> list[dict]:
+    """既存行のうち、**これから書く行と重ならないもの**だけ残す。
+
+    `write_to_sheet` はシートをいったん空にしてから書き戻す。つまりここで
+    落とした行は**消える**。埋め戻しで数か月ぶんを一度に書くときにいちばん
+    効くので、純粋な関数にしてテストで固定する。
+
+    ⚠️ **よその行を巻き添えにしない。** 同じシートにダイニーの行も新Uレジの
+    行も並ぶ。POS が違えば別行として必ず残す。ここを緩めると、
+    **片方のPOSを取り込むたびにもう片方が消える。**
+
+    ⚠️ **書く行が空なら何も落とさない。** 取得に失敗した月を「空で上書き」
+    しない（消してから書き戻す作りなので、落とすと復旧できない）。
+    """
+    if not rows:
+        return list(existing)
+    keys = {row_key(x) for x in rows}
+    return [r for r in existing if row_key(r) not in keys]
+
+
 def write_to_sheet(rows: list[dict], spreadsheet_id: str, worksheet: str = "POS売上"):
     import gspread
     from google.oauth2.service_account import Credentials
@@ -246,8 +277,7 @@ def write_to_sheet(rows: list[dict], spreadsheet_id: str, worksheet: str = "POS�
         ws.append_row(COLUMNS)
     # 同一(年月×店舗×POS)は重複させない：既存行を消してから追記
     existing = ws.get_all_records()
-    keep = [r for r in existing
-            if not any(r.get("年月")==x["年月"] and norm_name(r.get("店舗名",""))==norm_name(x["店舗名"]) and r.get("POS")==x["POS"] for x in rows)]
+    keep = keep_rows(existing, rows)
     # ⚠️ **1行ずつ append_row しない。** Sheets の書き込みは 1分/60回 で
     # 打ち止めになる。1か月ぶん（数行）なら足りるが、**埋め戻しで数百行に
     # なると途中で撥ねられ、シートが消えたまま（clear 済み）で止まる。**
