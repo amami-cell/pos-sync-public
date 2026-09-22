@@ -954,64 +954,87 @@ def _calendar_header(page, idx: int) -> str | None:
     return hits[0][1] if hits else None
 
 
-def _calendar_step(page, idx: int, forward: bool) -> bool:
-    """idx番目のカレンダーをひと月ぶん送る。押せたかを返す。
+# 月送りらしきものの見分け。**左右とは限らない。** 実測（2026-09-22）で
+# 枠の中にあったのは mdi-chevron-down / mdi-chevron-up だけで、
+# left / right は1つも無かった。上下・三角・矢印もまとめて候補にする。
+_NAV_PAT = (r"chevron|arrow|caret|angle|triangle|prev|previous|next|forward|back"
+            r"|up|down|left|right|前|次|翌|戻|‹|›|◀|▶|▲|▼|❮|❯")
 
-    ⚠️ **文字の無いアイコンのことがある。** 実測の「中の押せるもの」には
-    送るボタンが1つも出てこなかった（`innerText || aria-label` が空で
-    振るい落とされていた）。class も見る。"""
+
+def _nav_candidates(page, idx: int) -> list[str]:
+    """idx番目のカレンダーの「月送りらしきもの」に印をつけ、見分けを返す。
+
+    ⚠️ **どれが前でどれが次かは、ここでは決めない。** 実測では上下の
+    シェブロンしか無く、`up` が翌月なのか前月なのかは見た目からは分からない。
+    **押して、見出しがどちらに動いたかで覚える**（`_goto_month`）。
+    当てずっぽうで決めると、逆方向に送り続けて上限まで空回りする。
+    """
     try:
-        ok = page.evaluate(
-            r"""([idx, pat, anti]) => {
+        items = page.evaluate(
+            r"""([idx, pat]) => {
                 document.querySelectorAll('[data-claude-nav]')
                     .forEach(e => e.removeAttribute('data-claude-nav'));
                 const box = document.querySelector(`[data-claude-cal='${idx}']`);
-                if (!box) return 'カレンダーの印が消えている';
+                if (!box) return null;
                 const vis = el => el.offsetParent !== null
                                   || getComputedStyle(el).position === 'fixed';
-                const want = new RegExp(pat, 'i'), other = new RegExp(anti, 'i');
-                const cand = [...box.querySelectorAll(
-                    'button, [role=button], .v-btn, i, svg, [class*=icon]')]
-                    .filter(vis);
-                for (const b of cand) {
-                    const hay = [b.getAttribute('aria-label'), b.getAttribute('title'),
-                                 b.className, b.innerText]
-                        .map(x => String(x && x.baseVal !== undefined
-                                         ? x.baseVal : (x || ''))).join(' ');
-                    if (!want.test(hay) || other.test(hay)) continue;
-                    // 押せる器（button / v-btn）まで2段だけ上がる
-                    let t = b;
-                    for (let i = 0; i < 2 && t; i++, t = t.parentElement)
-                        if (t.tagName === 'BUTTON'
-                            || /v-btn/.test(String(t.className || ''))) break;
-                    (t || b).setAttribute('data-claude-nav', '1');
-                    return '';
+                const cls = el => {
+                    const c = el.className;
+                    return String(c && c.baseVal !== undefined ? c.baseVal : (c || ''));
+                };
+                const re = new RegExp(pat, 'i');
+                const picked = [], seen = new Set();
+                for (const el of box.querySelectorAll(
+                        'button, [role=button], .v-btn, i, svg, [class*=icon]')) {
+                    if (!vis(el)) continue;
+                    const hay = [el.getAttribute('aria-label'), el.getAttribute('title'),
+                                 cls(el), el.innerText].map(x => String(x || '')).join(' ');
+                    if (!re.test(hay)) continue;
+                    // 押せる器まで2段だけ上がる（見つからなければ本人を押す）
+                    let t = el;
+                    for (let i = 0; i < 2 && t.parentElement; i++) {
+                        if (t.tagName === 'BUTTON' || /v-btn/.test(cls(t))) break;
+                        t = t.parentElement;
+                    }
+                    if (seen.has(t)) continue;
+                    seen.add(t);
+                    const tag = el.tagName.toLowerCase();
+                    picked.push(tag + ':' + (cls(el).split(/\s+/)[0] || '?'));
+                    t.setAttribute('data-claude-nav', String(picked.length));
+                    if (picked.length >= 6) break;
                 }
-                return '送るボタンらしきものが無い';
-            }""", [idx, _NEXT_PAT if forward else _PREV_PAT,
-                   _PREV_PAT if forward else _NEXT_PAT])
+                return picked;
+            }""", [idx, _NAV_PAT])
     except Exception as e:
-        _note(f"[PL期間] 送るボタンを探せなかった: {type(e).__name__}: {e}")
-        return False
-    if ok:
-        _note(f"[PL期間] {'次' if forward else '前'}の月へ: {ok}")
-        return False
-    try:
-        page.locator("[data-claude-nav='1']").first.click(timeout=5000)
-    except Exception as e:
-        _note(f"[PL期間] 送るボタンを押せなかった: {type(e).__name__}")
-        return False
-    page.wait_for_timeout(1200)
-    return True
+        _note(f"[PL期間] 月送りを探せなかった: {type(e).__name__}: {e}")
+        return []
+    if items is None:
+        _note("[PL期間] カレンダーの印が消えている")
+        return []
+    return items
 
 
 def _goto_month(page, idx: int, ym: str) -> bool:
-    """idx番目のカレンダーを対象月まで送る。着いたかを返す。"""
+    """idx番目のカレンダーを対象月まで送る。着いたかを返す。
+
+    ⚠️ **送る向きは押して覚える。** どのアイコンが前月でどれが翌月かは
+    見た目から決められない（実測は上下のシェブロンだけ）。1回押して
+    見出しがどちらに動いたかを見て、そこから割り当てる。**逆に覚えたまま
+    押し続けると、上限まで空回りして1回ぶん無駄になる。**
+
+    ⚠️ **押しても見出しが動かない候補は捨てる。** 拡大縮小など、月送りでは
+    ないアイコンが混ざりうる。動かなかったものを候補から外して次を試す。
+    """
     header = _calendar_header(page, idx)
     if header is None:
         _note(f"[PL期間] {idx}番目のカレンダーの見出しが読めない")
         return False
     _note(f"[PL期間] {idx}番目のカレンダー: {header} → 目標 {ym}")
+    if month_steps(header, ym) == 0:
+        return True
+
+    role: dict[str, str] = {}   # "next"/"prev" → 候補の見分け
+    dead: set[str] = set()
     for _ in range(MAX_MONTH_STEPS + 1):
         steps = month_steps(header, ym)
         if steps == 0:
@@ -1019,18 +1042,93 @@ def _goto_month(page, idx: int, ym: str) -> bool:
         if abs(steps) > MAX_MONTH_STEPS:
             _note(f"[PL期間] {abs(steps)}か月も離れている。見出しの読み違いとみて中止")
             return False
-        if not _calendar_step(page, idx, forward=steps > 0):
+        cands = _nav_candidates(page, idx)
+        if not cands:
+            # 枠の外に置かれている作りかもしれない。**次の1回で分かるように**
+            # 枠の中身を出す（実行1回に30分の間隔が要るので、空振りさせない）。
+            _note("[PL期間] 月送りらしきものが枠の中に無い。枠の中身を出す")
+            _dump_box(page, idx)
             return False
-        # 送ったあとは印がつけ直される作りかもしれないので、取り直す
+        need = "next" if steps > 0 else "prev"
+        want = role.get(need)
+        if want is None:
+            free = [c for c in cands if c not in dead and c not in role.values()]
+            if not free:
+                _note(f"[PL期間] {need} に使える候補が尽きた（候補: {', '.join(cands)}）")
+                return False
+            want = free[0]
+            _note(f"[PL期間] {need} はどれか不明。{want} を押して確かめる")
+        if want not in cands:
+            _note(f"[PL期間] 覚えていた候補 {want} が見当たらない")
+            return False
+        try:
+            page.locator(f"[data-claude-nav='{cands.index(want) + 1}']").first.click(
+                timeout=5000)
+        except Exception as e:
+            _note(f"[PL期間] {want} を押せなかった: {type(e).__name__}")
+            dead.add(want)
+            continue
+        page.wait_for_timeout(1200)
         if not _mark_calendars(page):
             return False
-        nxt = _calendar_header(page, idx)
-        if nxt is None or nxt == header:
-            _note(f"[PL期間] 送ったのに見出しが {header} のまま。これ以上進めない")
+        now = _calendar_header(page, idx)
+        if now is None:
+            _note("[PL期間] 押したあと見出しが読めない")
             return False
-        header = nxt
+        delta = month_steps(header, now)
+        if delta == 0:
+            _note(f"[PL期間] {want} を押しても月が動かない。候補から外す")
+            dead.add(want)
+            continue
+        got = "next" if delta > 0 else "prev"
+        if role.get(got) != want:
+            role[got] = want
+            _note(f"[PL期間] {want} は {got}（{header} → {now}）")
+        header = now
     _note(f"[PL期間] {MAX_MONTH_STEPS}回送っても {ym} に着かなかった")
     return False
+
+
+def _dump_box(page, idx: int):
+    """カレンダーの枠の中にある押せそうなものを、class ごと出す。
+
+    月送りが見つからないときに、**枠の取り方が悪いのか／ボタンが枠の外に
+    あるのか**を切り分けるため。実行1回に30分の間隔が要るので、
+    失敗するときは必ず手がかりを残す。"""
+    try:
+        info = page.evaluate(
+            r"""(idx) => {
+                const box = document.querySelector(`[data-claude-cal='${idx}']`);
+                if (!box) return null;
+                const cut = s => (s || '').toString().trim()
+                    .replace(/\s+/g, ' ').slice(0, 50);
+                const cls = el => {
+                    const c = el.className;
+                    return String(c && c.baseVal !== undefined ? c.baseVal : (c || ''));
+                };
+                const vis = el => el.offsetParent !== null
+                                  || getComputedStyle(el).position === 'fixed';
+                const items = [];
+                for (const el of box.querySelectorAll(
+                        'button, [role=button], .v-btn, i, svg, [class*=icon], [class*=btn]')) {
+                    if (!vis(el)) continue;
+                    items.push([el.tagName.toLowerCase(), cut(cls(el)),
+                                cut(el.getAttribute('aria-label')),
+                                cut(el.innerText)].join('	'));
+                }
+                return { own: cut(cls(box)), tag: box.tagName.toLowerCase(),
+                         items: [...new Set(items)].slice(0, 25) };
+            }""", idx)
+    except Exception as e:
+        _note(f"[PL期間] 枠の中身を読めなかった: {type(e).__name__}: {e}")
+        return
+    if not info:
+        _note("[PL期間] カレンダーの印が消えている")
+        return
+    _note(f"[PL期間] 枠 {idx}: <{info['tag']} class={info['own']}>")
+    _note(f"[PL期間] 枠の中の押せそうなもの {len(info['items'])}件:")
+    for t in info["items"]:
+        _note(f"      # {t}")
 
 
 def day_cell_index(cells: list[str], day: int, last_day: int) -> int | None:
