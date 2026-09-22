@@ -983,13 +983,18 @@ def _nav_candidates(page, idx: int) -> list[str]:
                     return String(c && c.baseVal !== undefined ? c.baseVal : (c || ''));
                 };
                 const re = new RegExp(pat, 'i');
+                const all = [...box.querySelectorAll(
+                    'button, [role=button], .v-btn, i, svg, [class*=icon]')].filter(vis);
+                // ⚠️ **名前で絞れないことがある。** 実測（2026-09-22）で枠の中に
+                // あったのは class も aria-label も無い <svg> だけだった。
+                // まず名前で当て、1つも当たらなければ**枠の中のアイコンを全部**
+                // 候補にする。どれが月送りかは押して確かめるので、無名でも安全。
+                const named = all.filter(el => re.test(
+                    [el.getAttribute('aria-label'), el.getAttribute('title'),
+                     cls(el), el.innerText].map(x => String(x || '')).join(' ')));
+                const use = named.length ? named : all;
                 const picked = [], seen = new Set();
-                for (const el of box.querySelectorAll(
-                        'button, [role=button], .v-btn, i, svg, [class*=icon]')) {
-                    if (!vis(el)) continue;
-                    const hay = [el.getAttribute('aria-label'), el.getAttribute('title'),
-                                 cls(el), el.innerText].map(x => String(x || '')).join(' ');
-                    if (!re.test(hay)) continue;
+                for (const el of use) {
                     // 押せる器まで2段だけ上がる（見つからなければ本人を押す）
                     let t = el;
                     for (let i = 0; i < 2 && t.parentElement; i++) {
@@ -998,8 +1003,11 @@ def _nav_candidates(page, idx: int) -> list[str]:
                     }
                     if (seen.has(t)) continue;
                     seen.add(t);
+                    // **見分けには並び順を入れる。** 無名の svg が2つあるとき、
+                    // tag と class だけでは前と次が同じ名前になり区別できない。
                     const tag = el.tagName.toLowerCase();
-                    picked.push(tag + ':' + (cls(el).split(/\s+/)[0] || '?'));
+                    picked.push((picked.length + 1) + ':' + tag + ':'
+                                + (cls(el).split(/\s+/)[0] || '無名'));
                     t.setAttribute('data-claude-nav', String(picked.length));
                     if (picked.length >= 6) break;
                 }
@@ -1112,12 +1120,16 @@ def _dump_box(page, idx: int):
                 for (const el of box.querySelectorAll(
                         'button, [role=button], .v-btn, i, svg, [class*=icon], [class*=btn]')) {
                     if (!vis(el)) continue;
-                    items.push([el.tagName.toLowerCase(), cut(cls(el)),
-                                cut(el.getAttribute('aria-label')),
-                                cut(el.innerText)].join('	'));
+                    // ⚠️ **重複を潰さない。** 潰していたせいで「無名の svg が
+                    // 2つある（＝前と次）」ことが見えなかった。親の class も出す。
+                    items.push([(items.length + 1) + '.', el.tagName.toLowerCase(),
+                                cut(cls(el)) || '無名',
+                                cut(el.getAttribute('aria-label')) || '-',
+                                '親=' + (cut(cls(el.parentElement)) || '無名'),
+                                cut(el.innerText) || '-'].join('	'));
                 }
                 return { own: cut(cls(box)), tag: box.tagName.toLowerCase(),
-                         items: [...new Set(items)].slice(0, 25) };
+                         items: items.slice(0, 25) };
             }""", idx)
     except Exception as e:
         _note(f"[PL期間] 枠の中身を読めなかった: {type(e).__name__}: {e}")
